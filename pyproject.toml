@@ -18,6 +18,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
+    "python-multipart>=0.0.9",
 
     # Azure OpenAI
     "openai>=1.60.0",
