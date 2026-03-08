@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus2"
+    },
+    "environment": {
+      "value": "dev"
+    },
+    "projectName": {
+      "value": "cdss"
+    },
+    "containerImage": {
+      "value": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+    },
+    "gpt4oDeploymentName": {
+      "value": "gpt-4o"
+    },
+    "gpt4oMiniDeploymentName": {
+      "value": "gpt-4o-mini"
+    },
+    "embeddingDeploymentName": {
+      "value": "text-embedding-3-large"
+    },
+    "cosmosDatabaseName": {
+      "value": "cdss-db"
+    },
+    "tags": {
+      "value": {
+        "project": "cdss-agentic-rag",
+        "environment": "dev",
+        "managedBy": "bicep",
+        "team": "clinical-ai",
+        "costCenter": "research"
+      }
+    }
+  }
+}

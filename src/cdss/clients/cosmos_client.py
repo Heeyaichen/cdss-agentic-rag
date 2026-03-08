@@ -1,0 +1,623 @@
+"""Azure Cosmos DB client wrapper for patient data, conversations, and agent state."""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+from azure.cosmos import CosmosClient, PartitionKey, exceptions as cosmos_exceptions
+
+from cdss.core.config import Settings, get_settings
+from cdss.core.exceptions import AzureServiceError
+from cdss.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+# Container name constants
+CONTAINER_PATIENT_PROFILES = "patient_profiles"
+CONTAINER_CONVERSATIONS = "conversations"
+CONTAINER_EMBEDDING_CACHE = "embedding_cache"
+CONTAINER_AUDIT_LOG = "audit_log"
+CONTAINER_AGENT_STATE = "agent_state"
+
+
+class CosmosDBClient:
+    """Wrapper for Azure Cosmos DB for NoSQL with vector search.
+
+    Manages patient profiles, conversation history, embedding cache,
+    audit logs, and agent state across dedicated containers.
+    """
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        """Initialize Cosmos DB client and container references.
+
+        Args:
+            settings: Application settings. If None, loads from environment.
+        """
+        self._settings = settings or get_settings()
+
+        try:
+            self._client = CosmosClient(
+                url=self._settings.cosmos_db_endpoint,
+                credential=self._settings.cosmos_db_key,
+            )
+            self._database = self._client.get_database_client(
+                self._settings.cosmos_db_database_name
+            )
+
+            self._containers = {
+                CONTAINER_PATIENT_PROFILES: self._database.get_container_client(
+                    CONTAINER_PATIENT_PROFILES
+                ),
+                CONTAINER_CONVERSATIONS: self._database.get_container_client(
+                    CONTAINER_CONVERSATIONS
+                ),
+                CONTAINER_EMBEDDING_CACHE: self._database.get_container_client(
+                    CONTAINER_EMBEDDING_CACHE
+                ),
+                CONTAINER_AUDIT_LOG: self._database.get_container_client(
+                    CONTAINER_AUDIT_LOG
+                ),
+                CONTAINER_AGENT_STATE: self._database.get_container_client(
+                    CONTAINER_AGENT_STATE
+                ),
+            }
+
+            logger.info(
+                "CosmosDBClient initialized",
+                endpoint=self._settings.cosmos_db_endpoint,
+                database=self._settings.cosmos_db_database_name,
+                containers=list(self._containers.keys()),
+            )
+
+        except Exception as exc:
+            logger.error("Failed to initialize CosmosDBClient", error=str(exc))
+            raise AzureServiceError(
+                f"Failed to initialize Cosmos DB client: {exc}"
+            ) from exc
+
+    def _get_container(self, name: str) -> Any:
+        """Get a container client by name.
+
+        Args:
+            name: Container name.
+
+        Returns:
+            Container client instance.
+
+        Raises:
+            AzureServiceError: If the container name is not recognized.
+        """
+        container = self._containers.get(name)
+        if container is None:
+            raise AzureServiceError(
+                f"Unknown container: '{name}'. "
+                f"Valid containers: {list(self._containers.keys())}"
+            )
+        return container
+
+    # -------------------------------------------------------------------------
+    # Patient Profiles
+    # -------------------------------------------------------------------------
+
+    async def get_patient_profile(self, patient_id: str) -> dict | None:
+        """Retrieve a patient profile by patient ID.
+
+        Args:
+            patient_id: Unique patient identifier.
+
+        Returns:
+            Patient profile dict, or None if not found.
+
+        Raises:
+            AzureServiceError: If the read operation fails.
+        """
+        container = self._get_container(CONTAINER_PATIENT_PROFILES)
+
+        try:
+            item = container.read_item(item=patient_id, partition_key=patient_id)
+            logger.debug("Patient profile retrieved", patient_id=patient_id)
+            return dict(item)
+
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            logger.debug("Patient profile not found", patient_id=patient_id)
+            return None
+
+        except Exception as exc:
+            logger.error(
+                "Failed to get patient profile",
+                patient_id=patient_id,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to retrieve patient profile '{patient_id}': {exc}"
+            ) from exc
+
+    async def upsert_patient_profile(self, profile: dict) -> dict:
+        """Create or update a patient profile.
+
+        Args:
+            profile: Patient profile dict. Must include 'id' and 'patient_id' fields.
+
+        Returns:
+            The upserted profile dict as returned by Cosmos DB.
+
+        Raises:
+            AzureServiceError: If the upsert operation fails.
+        """
+        container = self._get_container(CONTAINER_PATIENT_PROFILES)
+
+        try:
+            profile["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if "created_at" not in profile:
+                profile["created_at"] = profile["updated_at"]
+
+            result = container.upsert_item(body=profile)
+            logger.info(
+                "Patient profile upserted",
+                patient_id=profile.get("patient_id", profile.get("id")),
+            )
+            return dict(result)
+
+        except Exception as exc:
+            logger.error(
+                "Failed to upsert patient profile",
+                patient_id=profile.get("patient_id", profile.get("id")),
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to upsert patient profile: {exc}"
+            ) from exc
+
+    async def vector_search_patients(
+        self, query_vector: list[float], top: int = 10
+    ) -> list[dict]:
+        """Search patient profiles using vector similarity.
+
+        Uses the Cosmos DB for NoSQL vector search capability to find
+        semantically similar patient profiles.
+
+        Args:
+            query_vector: Query embedding vector.
+            top: Maximum number of results to return.
+
+        Returns:
+            List of matching patient profile dicts with similarity scores.
+
+        Raises:
+            AzureServiceError: If the vector search fails.
+        """
+        container = self._get_container(CONTAINER_PATIENT_PROFILES)
+
+        try:
+            query = (
+                "SELECT TOP @top c.id, c.patient_id, c.name, c.conditions, "
+                "c.medications, c.allergies, c.demographics, "
+                "VectorDistance(c.embedding, @queryVector) AS similarity_score "
+                "FROM c "
+                "ORDER BY VectorDistance(c.embedding, @queryVector)"
+            )
+
+            parameters: list[dict[str, Any]] = [
+                {"name": "@top", "value": top},
+                {"name": "@queryVector", "value": query_vector},
+            ]
+
+            results = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+
+            logger.info(
+                "Vector search on patient profiles completed",
+                results_count=len(results),
+                top=top,
+            )
+
+            return [dict(r) for r in results]
+
+        except Exception as exc:
+            logger.error(
+                "Vector search on patient profiles failed",
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Vector search on patient profiles failed: {exc}"
+            ) from exc
+
+    # -------------------------------------------------------------------------
+    # Conversation History
+    # -------------------------------------------------------------------------
+
+    async def save_conversation_turn(self, turn: dict) -> dict:
+        """Save a single conversation turn.
+
+        Args:
+            turn: Conversation turn dict. Must include 'id' and 'session_id'.
+                  Expected keys: session_id, role, content, timestamp, metadata.
+
+        Returns:
+            The saved turn dict as returned by Cosmos DB.
+
+        Raises:
+            AzureServiceError: If the save operation fails.
+        """
+        container = self._get_container(CONTAINER_CONVERSATIONS)
+
+        try:
+            if "timestamp" not in turn:
+                turn["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+            result = container.create_item(body=turn)
+            logger.debug(
+                "Conversation turn saved",
+                session_id=turn.get("session_id"),
+                turn_id=turn.get("id"),
+            )
+            return dict(result)
+
+        except Exception as exc:
+            logger.error(
+                "Failed to save conversation turn",
+                session_id=turn.get("session_id"),
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to save conversation turn: {exc}"
+            ) from exc
+
+    async def get_conversation_history(
+        self, session_id: str, limit: int = 20
+    ) -> list[dict]:
+        """Retrieve conversation history for a session.
+
+        Args:
+            session_id: Session identifier to retrieve history for.
+            limit: Maximum number of turns to return, ordered by timestamp descending.
+
+        Returns:
+            List of conversation turn dicts, most recent first.
+
+        Raises:
+            AzureServiceError: If the query fails.
+        """
+        container = self._get_container(CONTAINER_CONVERSATIONS)
+
+        try:
+            query = (
+                "SELECT TOP @limit * FROM c "
+                "WHERE c.session_id = @sessionId "
+                "ORDER BY c.timestamp DESC"
+            )
+
+            parameters: list[dict[str, Any]] = [
+                {"name": "@limit", "value": limit},
+                {"name": "@sessionId", "value": session_id},
+            ]
+
+            results = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    partition_key=session_id,
+                )
+            )
+
+            logger.debug(
+                "Conversation history retrieved",
+                session_id=session_id,
+                turns_count=len(results),
+            )
+
+            return [dict(r) for r in results]
+
+        except Exception as exc:
+            logger.error(
+                "Failed to get conversation history",
+                session_id=session_id,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to retrieve conversation history for session "
+                f"'{session_id}': {exc}"
+            ) from exc
+
+    # -------------------------------------------------------------------------
+    # Embedding Cache
+    # -------------------------------------------------------------------------
+
+    async def get_cached_embedding(
+        self, source_type: str, content_hash: str
+    ) -> list[float] | None:
+        """Retrieve a cached embedding by source type and content hash.
+
+        Args:
+            source_type: Type of source content (e.g., "patient_record", "protocol").
+            content_hash: SHA-256 hash of the content that was embedded.
+
+        Returns:
+            The cached embedding vector, or None if not found.
+
+        Raises:
+            AzureServiceError: If the lookup fails.
+        """
+        container = self._get_container(CONTAINER_EMBEDDING_CACHE)
+        cache_id = f"{source_type}:{content_hash}"
+
+        try:
+            item = container.read_item(item=cache_id, partition_key=source_type)
+            logger.debug(
+                "Embedding cache hit",
+                source_type=source_type,
+                content_hash=content_hash,
+            )
+            return item.get("embedding")
+
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            logger.debug(
+                "Embedding cache miss",
+                source_type=source_type,
+                content_hash=content_hash,
+            )
+            return None
+
+        except Exception as exc:
+            logger.error(
+                "Failed to get cached embedding",
+                source_type=source_type,
+                content_hash=content_hash,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to retrieve cached embedding: {exc}"
+            ) from exc
+
+    async def cache_embedding(
+        self, source_type: str, content_hash: str, embedding: list[float]
+    ) -> None:
+        """Cache an embedding vector for future retrieval.
+
+        Args:
+            source_type: Type of source content.
+            content_hash: SHA-256 hash of the content that was embedded.
+            embedding: The embedding vector to cache.
+
+        Raises:
+            AzureServiceError: If the cache write fails.
+        """
+        container = self._get_container(CONTAINER_EMBEDDING_CACHE)
+        cache_id = f"{source_type}:{content_hash}"
+
+        try:
+            cache_entry = {
+                "id": cache_id,
+                "source_type": source_type,
+                "content_hash": content_hash,
+                "embedding": embedding,
+                "dimensions": len(embedding),
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "ttl": 86400 * 30,  # 30 days TTL
+            }
+
+            container.upsert_item(body=cache_entry)
+            logger.debug(
+                "Embedding cached",
+                source_type=source_type,
+                content_hash=content_hash,
+                dimensions=len(embedding),
+            )
+
+        except Exception as exc:
+            logger.error(
+                "Failed to cache embedding",
+                source_type=source_type,
+                content_hash=content_hash,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to cache embedding: {exc}"
+            ) from exc
+
+    # -------------------------------------------------------------------------
+    # Audit Log
+    # -------------------------------------------------------------------------
+
+    async def log_audit_event(self, event: dict) -> dict:
+        """Log an audit event for compliance tracking.
+
+        Args:
+            event: Audit event dict. Expected keys: event_type, user_id,
+                   patient_id (optional), action, details, timestamp.
+
+        Returns:
+            The saved audit event dict.
+
+        Raises:
+            AzureServiceError: If the logging operation fails.
+        """
+        container = self._get_container(CONTAINER_AUDIT_LOG)
+
+        try:
+            if "timestamp" not in event:
+                event["timestamp"] = datetime.now(timezone.utc).isoformat()
+            if "epoch_ms" not in event:
+                event["epoch_ms"] = int(time.time() * 1000)
+
+            result = container.create_item(body=event)
+            logger.info(
+                "Audit event logged",
+                event_id=event.get("id"),
+                event_type=event.get("event_type"),
+                patient_id=event.get("patient_id"),
+            )
+            return dict(result)
+
+        except Exception as exc:
+            logger.error(
+                "Failed to log audit event",
+                event_type=event.get("event_type"),
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to log audit event: {exc}"
+            ) from exc
+
+    async def get_audit_trail(
+        self,
+        patient_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Retrieve audit trail with optional filtering.
+
+        Args:
+            patient_id: Optional patient ID to filter audit events.
+            date_from: Optional start date (ISO 8601 format) for date range filter.
+            date_to: Optional end date (ISO 8601 format) for date range filter.
+            limit: Maximum number of events to return.
+
+        Returns:
+            List of audit event dicts, ordered by timestamp descending.
+
+        Raises:
+            AzureServiceError: If the query fails.
+        """
+        container = self._get_container(CONTAINER_AUDIT_LOG)
+
+        try:
+            conditions: list[str] = []
+            parameters: list[dict[str, Any]] = [
+                {"name": "@limit", "value": limit},
+            ]
+
+            if patient_id is not None:
+                conditions.append("c.patient_id = @patientId")
+                parameters.append({"name": "@patientId", "value": patient_id})
+
+            if date_from is not None:
+                conditions.append("c.timestamp >= @dateFrom")
+                parameters.append({"name": "@dateFrom", "value": date_from})
+
+            if date_to is not None:
+                conditions.append("c.timestamp <= @dateTo")
+                parameters.append({"name": "@dateTo", "value": date_to})
+
+            where_clause = ""
+            if conditions:
+                where_clause = "WHERE " + " AND ".join(conditions)
+
+            query = (
+                f"SELECT TOP @limit * FROM c "
+                f"{where_clause} "
+                f"ORDER BY c.timestamp DESC"
+            )
+
+            results = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+
+            logger.debug(
+                "Audit trail retrieved",
+                patient_id=patient_id,
+                date_from=date_from,
+                date_to=date_to,
+                results_count=len(results),
+            )
+
+            return [dict(r) for r in results]
+
+        except Exception as exc:
+            logger.error(
+                "Failed to get audit trail",
+                patient_id=patient_id,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to retrieve audit trail: {exc}"
+            ) from exc
+
+    # -------------------------------------------------------------------------
+    # Agent State
+    # -------------------------------------------------------------------------
+
+    async def save_agent_state(self, session_id: str, state: dict) -> dict:
+        """Save or update agent state for a session.
+
+        Args:
+            session_id: Session identifier.
+            state: Agent state dict containing workflow state, intermediate results, etc.
+
+        Returns:
+            The saved state dict as returned by Cosmos DB.
+
+        Raises:
+            AzureServiceError: If the save operation fails.
+        """
+        container = self._get_container(CONTAINER_AGENT_STATE)
+
+        try:
+            state_doc = {
+                "id": session_id,
+                "session_id": session_id,
+                "state": state,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            result = container.upsert_item(body=state_doc)
+            logger.debug(
+                "Agent state saved",
+                session_id=session_id,
+            )
+            return dict(result)
+
+        except Exception as exc:
+            logger.error(
+                "Failed to save agent state",
+                session_id=session_id,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to save agent state for session '{session_id}': {exc}"
+            ) from exc
+
+    async def get_agent_state(self, session_id: str) -> dict | None:
+        """Retrieve agent state for a session.
+
+        Args:
+            session_id: Session identifier.
+
+        Returns:
+            Agent state dict, or None if no state exists for the session.
+
+        Raises:
+            AzureServiceError: If the read operation fails.
+        """
+        container = self._get_container(CONTAINER_AGENT_STATE)
+
+        try:
+            item = container.read_item(item=session_id, partition_key=session_id)
+            logger.debug("Agent state retrieved", session_id=session_id)
+            return dict(item).get("state")
+
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            logger.debug("Agent state not found", session_id=session_id)
+            return None
+
+        except Exception as exc:
+            logger.error(
+                "Failed to get agent state",
+                session_id=session_id,
+                error=str(exc),
+            )
+            raise AzureServiceError(
+                f"Failed to retrieve agent state for session '{session_id}': {exc}"
+            ) from exc
