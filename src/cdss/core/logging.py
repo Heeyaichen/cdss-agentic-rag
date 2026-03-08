@@ -109,6 +109,21 @@ class PlainFormatter(logging.Formatter):
         if record.stack_info:
             base += "\n" + record.stack_info
         return base
+        
+class StructuredLoggerAdapter(logging.LoggerAdapter):
+    """Adapter that converts keyword arguments to extra dict for structured logging."""
+    
+    def process(self, msg, kwargs):
+        # Extract any non-standard kwargs and move them to 'extra'
+        extra = kwargs.get('extra', {})
+        standard_keys = {'exc_info', 'stack_info', 'stacklevel', 'extra'}
+        
+        for key in list(kwargs.keys()):
+            if key not in standard_keys:
+                extra[key] = kwargs.pop(key)
+        if extra:
+            kwargs['extra'] = extra
+        return msg, kwargs
 
 
 def setup_logging(level: str = "INFO", json_format: bool = True) -> None:
@@ -143,7 +158,7 @@ def setup_logging(level: str = "INFO", json_format: bool = True) -> None:
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
-def get_logger(name: str) -> logging.Logger:
+def get_logger(name: str) -> StructuredLoggerAdapter:
     """Return a named logger for the given module or component.
 
     Usage::
@@ -151,12 +166,16 @@ def get_logger(name: str) -> logging.Logger:
         from cdss.core.logging import get_logger
 
         logger = get_logger(__name__)
+        # Both syntaxes are supported:
         logger.info("Processing clinical query", extra={"patient_id": "P-12345"})
+        logger.info("Processing clinical query", patient_id="P-12345")
 
     Args:
         name: Logger name, typically ``__name__`` of the calling module.
 
     Returns:
-        A configured :class:`logging.Logger` instance.
+        A configured :class:`StructuredLoggerAdapter` instance that accepts
+        keyword arguments and converts them to structured extra fields.
     """
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+    return StructuredLoggerAdapter(logger, {})
