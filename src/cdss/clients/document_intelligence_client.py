@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient as AzureDocIntelClient
-from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, ContentFormat
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 from azure.core.credentials import AzureKeyCredential
 
 from cdss.core.config import Settings, get_settings
@@ -85,7 +85,6 @@ class DocumentIntelligenceClient:
             poller = self._client.begin_analyze_document(
                 model_id=model_id,
                 analyze_request=AnalyzeDocumentRequest(bytes_source=document_bytes),
-                output_content_format=ContentFormat.MARKDOWN,
             )
             result = poller.result()
 
