@@ -52,7 +52,7 @@ class MedicalCondition(BaseModel):
             "examples": [
                 {
                     "code": "E11.9",
-                    "system": "ICD-10",
+                    "coding_system": "ICD-10",
                     "display": "Type 2 diabetes mellitus without complications",
                     "onset_date": "2019-03-15",
                     "status": "active",
@@ -62,7 +62,7 @@ class MedicalCondition(BaseModel):
     )
 
     code: str = Field(..., description="Condition code (e.g., ICD-10 or SNOMED-CT code).")
-    system: Literal["ICD-10", "SNOMED-CT"] = Field(
+    coding_system: Literal["ICD-10", "SNOMED-CT"] = Field(
         ..., description="Coding system used."
     )
     display: str = Field(..., description="Human-readable condition name.")
@@ -116,7 +116,7 @@ class Allergy(BaseModel):
                     "reaction": "Anaphylaxis",
                     "severity": "severe",
                     "code": "91936005",
-                    "system": "SNOMED-CT",
+                    "coding_system": "SNOMED-CT",
                 }
             ]
         }
@@ -130,7 +130,7 @@ class Allergy(BaseModel):
     code: str | None = Field(
         default=None, description="Coded identifier for the allergen."
     )
-    system: str | None = Field(
+    coding_system: str | None = Field(
         default=None, description="Coding system for the allergen code."
     )
 
@@ -143,11 +143,11 @@ class LabResult(BaseModel):
             "examples": [
                 {
                     "code": "4548-4",
-                    "system": "LOINC",
+                    "coding_system": "LOINC",
                     "display": "Hemoglobin A1c",
                     "value": 7.2,
                     "unit": "%",
-                    "date": "2025-11-01",
+                    "test_date": "2025-11-01",
                     "reference_range": "4.0-5.6",
                 }
             ]
@@ -155,13 +155,13 @@ class LabResult(BaseModel):
     )
 
     code: str = Field(..., description="Lab test code (e.g., LOINC code).")
-    system: Literal["LOINC"] = Field(
+    coding_system: Literal["LOINC"] = Field(
         default="LOINC", description="Coding system for the lab test."
     )
     display: str = Field(..., description="Human-readable lab test name.")
     value: float = Field(..., description="Numeric result value.")
     unit: str = Field(..., description="Unit of measurement (e.g., 'mg/dL', '%').")
-    date: date = Field(..., description="Date the lab was collected.")
+    test_date: date = Field(..., description="Date the lab was collected.")
     reference_range: str | None = Field(
         default=None,
         description="Normal reference range (e.g., '4.0-5.6').",
@@ -181,7 +181,7 @@ class PatientProfile(BaseModel):
                 {
                     "id": "prof-001",
                     "patient_id": "P-12345",
-                    "type": "patient_profile",
+                    "doc_type": "patient_profile",
                     "demographics": {
                         "age": 62,
                         "sex": "male",
@@ -205,7 +205,7 @@ class PatientProfile(BaseModel):
         description="Unique document ID.",
     )
     patient_id: str = Field(..., description="External patient identifier.")
-    type: str = Field(
+    doc_type: str = Field(
         default="patient_profile",
         description="Document type discriminator for Cosmos DB.",
     )
@@ -244,7 +244,7 @@ class PatientProfile(BaseModel):
 class ExtractedEntity(BaseModel):
     """A clinical entity extracted from the query text via NER."""
 
-    type: Literal[
+    entity_type: Literal[
         "condition", "medication", "lab_test", "procedure", "anatomical_site"
     ] = Field(..., description="Entity type category.")
     value: str = Field(..., description="Extracted entity text.")
@@ -266,8 +266,8 @@ class ClinicalQuery(BaseModel):
                     "session_id": "sess-abc123",
                     "intent": "treatment",
                     "extracted_entities": [
-                        {"type": "condition", "value": "type 2 diabetes", "code": "E11.9"},
-                        {"type": "condition", "value": "CKD stage 3", "code": "N18.3"},
+                        {"entity_type": "condition", "value": "type 2 diabetes", "code": "E11.9"},
+                        {"entity_type": "condition", "value": "CKD stage 3", "code": "N18.3"},
                     ],
                 }
             ]
@@ -453,7 +453,7 @@ class ConversationTurn(BaseModel):
     patient_id: str = Field(
         ..., description="Patient ID associated with this conversation."
     )
-    type: str = Field(
+    doc_type: str = Field(
         default="conversation_turn",
         description="Document type discriminator for Cosmos DB.",
     )
@@ -506,11 +506,11 @@ class AuditLogEntry(BaseModel):
                 {
                     "id": "audit-001",
                     "date_partition": "2025-12-01",
-                    "type": "patient_data_access",
+                    "event_type": "patient_data_access",
                     "timestamp": "2025-12-01T10:30:00Z",
                     "actor": {"clinician_id": "C-001", "role": "physician"},
                     "action": "read_patient_profile",
-                    "resource": {"type": "patient_profile", "id": "P-12345"},
+                    "resource": {"resource_type": "patient_profile", "id": "P-12345"},
                     "session_id": "sess-abc123",
                     "justification": "Clinical query about treatment options",
                     "outcome": "success",
@@ -530,7 +530,7 @@ class AuditLogEntry(BaseModel):
         ...,
         description="Date partition key for Cosmos DB (format: YYYY-MM-DD).",
     )
-    type: str = Field(
+    event_type: str = Field(
         ...,
         description="Audit event type (e.g., 'patient_data_access', 'llm_interaction', 'agent_execution').",
     )
@@ -548,7 +548,7 @@ class AuditLogEntry(BaseModel):
     )
     resource: dict[str, str] = Field(
         ...,
-        description="Resource accessed (type, id).",
+        description="Resource accessed (resource_type, id).",
     )
     session_id: str = Field(
         ..., description="Session ID for correlating related audit events."
@@ -590,7 +590,7 @@ class AgentTask(BaseModel):
     to_agent: str = Field(
         ..., description="Name of the receiving agent."
     )
-    type: Literal["task_request", "task_response", "error"] = Field(
+    message_type: Literal["task_request", "task_response", "error"] = Field(
         ..., description="Message type."
     )
     payload: dict = Field(
