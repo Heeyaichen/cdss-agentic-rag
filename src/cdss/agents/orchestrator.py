@@ -360,7 +360,7 @@ class OrchestratorAgent:
 
             query.extracted_entities = [
                 ExtractedEntity(
-                    type="condition" if "condition" in str(e).lower() else "medication",
+                    entity_type="condition" if "condition" in str(e).lower() else "medication",
                     value=str(e),
                 )
                 for e in entities
@@ -500,20 +500,20 @@ class OrchestratorAgent:
                 task_payload["conditions"] = [
                     e.value
                     for e in (query.extracted_entities or [])
-                    if e.type == "condition"
+                    if e.entity_type == "condition"
                 ]
 
             elif agent_name == "drug_safety":
                 task_payload["medications"] = [
                     e.value
                     for e in (query.extracted_entities or [])
-                    if e.type == "medication"
+                    if e.entity_type == "medication"
                 ]
 
             agent_task = AgentTask(
                 from_agent="orchestrator",
                 to_agent=agent_name,
-                type="task_request",
+                message_type="task_request",
                 payload=task_payload,
                 session_id=session_id,
                 trace_id=trace_id,
@@ -862,7 +862,7 @@ class OrchestratorAgent:
                 guardrails_task = AgentTask(
                     from_agent="orchestrator",
                     to_agent="guardrails",
-                    type="task_request",
+                    message_type="task_request",
                     payload={
                         "response": response.model_dump(mode="json"),
                         "agent_outputs": {
