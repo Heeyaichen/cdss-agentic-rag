@@ -59,8 +59,10 @@ class AzureOpenAIClient:
 
         logger.info(
             "AzureOpenAIClient initialized",
-            endpoint=self._settings.azure_openai_endpoint,
-            api_version=self._settings.azure_openai_api_version,
+            extra={
+                "endpoint": self._settings.azure_openai_endpoint,
+                "api_version": self._settings.azure_openai_api_version,
+            }
         )
 
     async def _retry_with_backoff(self, coro_factory, operation_name: str) -> Any:
