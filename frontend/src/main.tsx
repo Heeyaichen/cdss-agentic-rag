@@ -6,6 +6,7 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { initializeAuth } from './lib/auth';
 import { useThemeStore } from './stores/userStore';
+import ErrorBoundary from './components/common/ErrorBoundary';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -94,17 +95,30 @@ const ThemedApp: React.FC = () => {
       <CssBaseline />
       <BrowserRouter>
         <QueryClientProvider client={queryClient}>
-          <App />
+          <ErrorBoundary>
+            <App />
+          </ErrorBoundary>
         </QueryClientProvider>
       </BrowserRouter>
     </ThemeProvider>
   );
 };
 
+async function enableMocking() {
+  if (import.meta.env.DEV) {
+    const { worker } = await import('./mocks/browser');
+    return worker.start({
+      onUnhandledRequest: 'bypass',
+    });
+  }
+}
+
 initializeAuth().then(() => {
-  ReactDOM.createRoot(document.getElementById('root')!).render(
-    <React.StrictMode>
-      <ThemedApp />
-    </React.StrictMode>
-  );
+  enableMocking().then(() => {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>
+        <ThemedApp />
+      </React.StrictMode>
+    );
+  });
 });

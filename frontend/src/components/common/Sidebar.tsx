@@ -92,7 +92,7 @@ export default function Sidebar() {
                 selected={location.pathname === item.path}
                 onClick={() => navigate(item.path)}
               >
-                <ListItemIcon><item.icon /></ListItemIcon>
+                <ListItemIcon>{item.icon}</ListItemIcon>
                 <ListItemText primary={item.text} />
               </ListItemButton>
             </ListItem>

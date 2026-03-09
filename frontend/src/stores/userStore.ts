@@ -12,6 +12,7 @@ interface UserState {
   setUser: (user: User | null) => void;
   setAuthenticated: (isAuthenticated: boolean) => void;
   setTheme: (theme: 'light' | 'dark') => void;
+  toggleTheme: () => void;
   updateActivity: () => void;
   resetSession: () => void;
   logout: () => void;
@@ -32,6 +33,10 @@ export const useUserStore = create<UserState>()(
       
       setTheme: (theme) => set({ theme }),
       
+      toggleTheme: () => set((state) => ({ 
+        theme: state.theme === 'light' ? 'dark' : 'light' 
+      })),
+      
       updateActivity: () => set({ lastActivity: Date.now() }),
       
       resetSession: () => set({
@@ -50,20 +55,15 @@ export const useUserStore = create<UserState>()(
     }),
     {
       name: 'user-storage',
-      partialize: true,
+      partialize: (state) => ({
+        theme: state.theme,
+        sessionTimeout: state.sessionTimeout,
+      }),
     }
   )
 );
 
-export const useThemeStore = create<{ theme: 'light' | 'dark'; toggleTheme: () => void }>()(
-  persist(
-    (set) => ({
-      theme: 'light' as const,
-      toggleTheme: () => set((state) => ({ theme: state.theme === 'light' ? 'dark' : 'light' })),
-    }),
-    { name: 'theme-storage' }
-  )
-);
+export const useThemeStore = useUserStore;
 
 interface QueryHistoryState {
   queries: Array<{ id: string; query: string; timestamp: number }>;

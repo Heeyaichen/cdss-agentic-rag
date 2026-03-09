@@ -15,13 +15,18 @@ import {
   TableHead,
   TableRow,
   Alert,
+  Divider,
+  useTheme,
+  alpha,
 } from '@mui/material';
-import { Search, Warning, Error, Info } from '@mui/icons-material';
+import { Search, Warning, Error as ErrorIcon, Info, Add, Delete } from '@mui/icons-material';
 import { useMutation } from '@tanstack/react-query';
 import { clinicalApi } from '@/lib/api-client';
 import { DrugInteraction } from '@/lib/types';
+import InteractionMatrix from '@/components/drugs/InteractionMatrix';
 
 export default function DrugCheckerPage() {
+  const theme = useTheme();
   const [medications, setMedications] = useState<string[]>([]);
   const [inputValue, setInputValue] = useState('');
 
@@ -33,8 +38,9 @@ export default function DrugCheckerPage() {
   });
 
   const handleAdd = () => {
-    if (inputValue.trim() && !medications.includes(inputValue.trim())) {
-      setMedications([...medications, inputValue.trim()]);
+    const trimmed = inputValue.trim();
+    if (trimmed && !medications.includes(trimmed)) {
+      setMedications([...medications, trimmed]);
       setInputValue('');
     }
   };
@@ -43,56 +49,74 @@ export default function DrugCheckerPage() {
     setMedications(medications.filter((m) => m !== med));
   };
 
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleAdd();
+    }
+  };
+
   const getSeverityColor = (severity: string) => {
     switch (severity) {
       case 'major':
-        return 'error';
+        return theme.palette.error.main;
       case 'moderate':
-        return 'warning';
+        return theme.palette.warning.main;
       case 'minor':
-        return 'info';
+        return theme.palette.info.main;
       default:
-        return 'default';
+        return theme.palette.grey[500];
     }
   };
 
   const getSeverityIcon = (severity: string) => {
     switch (severity) {
       case 'major':
-        return <Error />;
+        return <ErrorIcon fontSize="small" />;
       case 'moderate':
-        return <Warning />;
+        return <Warning fontSize="small" />;
       case 'minor':
-        return <Info />;
+        return <Info fontSize="small" />;
       default:
         return null;
     }
   };
+
+  const interactions = checkInteractions.data?.interactions || [];
+  const majorCount = interactions.filter((i: DrugInteraction) => i.severity === 'major').length;
+  const moderateCount = interactions.filter((i: DrugInteraction) => i.severity === 'moderate').length;
+  const minorCount = interactions.filter((i: DrugInteraction) => i.severity === 'minor').length;
 
   return (
     <Box>
       <Typography variant="h4" gutterBottom fontWeight={600}>
         Drug Interaction Checker
       </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        Check for potential drug-drug interactions between medications
+      </Typography>
 
       <Card sx={{ mb: 3 }}>
         <CardContent>
+          <Typography variant="h6" gutterBottom>
+            Add Medications
+          </Typography>
           <Grid container spacing={2} alignItems="center">
             <Grid item xs={12} md={8}>
               <TextField
                 fullWidth
-                label="Add Medication"
+                label="Medication Name"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleAdd()}
-                placeholder="Enter medication name..."
+                onKeyPress={handleKeyPress}
+                placeholder="Enter medication name and press Enter..."
+                size="small"
               />
             </Grid>
             <Grid item xs={12} md={4}>
               <Button
                 fullWidth
                 variant="contained"
-                startIcon={<Search />}
+                startIcon={<Add />}
                 onClick={handleAdd}
                 disabled={!inputValue.trim()}
               >
@@ -101,86 +125,202 @@ export default function DrugCheckerPage() {
             </Grid>
           </Grid>
 
-          <Box sx={{ mt: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-            {medications.map((med) => (
-              <Chip
-                key={med}
-                label={med}
-                onDelete={() => handleRemove(med)}
-                color="primary"
-              />
-            ))}
-          </Box>
+          {medications.length > 0 && (
+            <Box sx={{ mt: 3 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Added Medications ({medications.length})
+              </Typography>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                {medications.map((med) => (
+                  <Chip
+                    key={med}
+                    label={med}
+                    onDelete={() => handleRemove(med)}
+                    color="primary"
+                    variant="outlined"
+                    deleteIcon={<Delete />}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+
+          <Divider sx={{ my: 3 }} />
 
           <Button
             variant="contained"
             color="primary"
             size="large"
-            sx={{ mt: 3 }}
+            startIcon={<Search />}
             onClick={() => checkInteractions.mutate()}
-            disabled={medications.length < 2}
+            disabled={medications.length < 2 || checkInteractions.isPending}
           >
-            Check Interactions
+            {checkInteractions.isPending ? 'Checking...' : 'Check Interactions'}
           </Button>
+
+          {medications.length < 2 && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              Add at least 2 medications to check for interactions
+            </Typography>
+          )}
         </CardContent>
       </Card>
 
       {checkInteractions.isPending && (
-        <Alert severity="info">Checking for drug interactions...</Alert>
+        <Alert severity="info" sx={{ mb: 3 }}>
+          Checking for drug interactions...
+        </Alert>
       )}
 
       {checkInteractions.isError && (
-        <Alert severity="error">
+        <Alert severity="error" sx={{ mb: 3 }}>
           Failed to check interactions. Please try again.
         </Alert>
       )}
 
       {checkInteractions.data && (
-        <Paper>
-          <Box sx={{ p: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Interaction Results
-            </Typography>
-          </Box>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell>Drug A</TableCell>
-                <TableCell>Drug B</TableCell>
-                <TableCell>Severity</TableCell>
-                <TableCell>Description</TableCell>
-                <TableCell>Evidence</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {(checkInteractions.data.interactions || []).map(
-                (interaction: DrugInteraction, i: number) => (
-                  <TableRow key={i}>
-                    <TableCell>{interaction.drug_a}</TableCell>
-                    <TableCell>{interaction.drug_b}</TableCell>
-                    <TableCell>
-                      <Chip
-                        icon={getSeverityIcon(interaction.severity)}
-                        label={interaction.severity.toUpperCase()}
-                        color={getSeverityColor(interaction.severity) as any}
-                        size="small"
-                      />
-                    </TableCell>
-                    <TableCell>{interaction.description}</TableCell>
-                    <TableCell>Level {interaction.evidence_level}</TableCell>
-                  </TableRow>
-                )
+        <Box>
+          {(majorCount > 0 || moderateCount > 0 || minorCount > 0) && (
+            <Box sx={{ display: 'flex', gap: 2, mb: 3 }}>
+              {majorCount > 0 && (
+                <Paper sx={{ p: 2, bgcolor: alpha(theme.palette.error.main, 0.1) }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <ErrorIcon color="error" />
+                    <Typography fontWeight={600} color="error.main">
+                      {majorCount} Major
+                    </Typography>
+                  </Box>
+                </Paper>
               )}
-              {checkInteractions.data.interactions?.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} align="center">
-                    No interactions found
-                  </TableCell>
-                </TableRow>
+              {moderateCount > 0 && (
+                <Paper sx={{ p: 2, bgcolor: alpha(theme.palette.warning.main, 0.1) }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Warning color="warning" />
+                    <Typography fontWeight={600} color="warning.main">
+                      {moderateCount} Moderate
+                    </Typography>
+                  </Box>
+                </Paper>
               )}
-            </TableBody>
-          </Table>
-        </Paper>
+              {minorCount > 0 && (
+                <Paper sx={{ p: 2, bgcolor: alpha(theme.palette.info.main, 0.1) }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Info color="info" />
+                    <Typography fontWeight={600} color="info.main">
+                      {minorCount} Minor
+                    </Typography>
+                  </Box>
+                </Paper>
+              )}
+            </Box>
+          )}
+
+          <Grid container spacing={3}>
+            <Grid item xs={12}>
+              <Typography variant="h6" gutterBottom fontWeight={600}>
+                Interaction Matrix
+              </Typography>
+              <InteractionMatrix
+                medications={medications}
+                interactions={interactions}
+              />
+            </Grid>
+
+            <Grid item xs={12}>
+              <Typography variant="h6" gutterBottom fontWeight={600}>
+                Detailed Results
+              </Typography>
+              <Paper>
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Drug A</TableCell>
+                      <TableCell>Drug B</TableCell>
+                      <TableCell>Severity</TableCell>
+                      <TableCell>Description</TableCell>
+                      <TableCell>Evidence</TableCell>
+                      <TableCell>Source</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {interactions.map((interaction: DrugInteraction, i: number) => (
+                      <TableRow key={i} hover>
+                        <TableCell>{interaction.drug_a}</TableCell>
+                        <TableCell>{interaction.drug_b}</TableCell>
+                        <TableCell>
+                          <Chip
+                            icon={getSeverityIcon(interaction.severity)}
+                            label={interaction.severity.toUpperCase()}
+                            sx={{
+                              bgcolor: alpha(getSeverityColor(interaction.severity), 0.15),
+                              color: getSeverityColor(interaction.severity),
+                              fontWeight: 600,
+                            }}
+                            size="small"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ maxWidth: 300 }}>
+                            {interaction.description}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>Level {interaction.evidence_level}</TableCell>
+                        <TableCell>{interaction.source}</TableCell>
+                      </TableRow>
+                    ))}
+                    {interactions.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={6} align="center">
+                          <Box sx={{ py: 4 }}>
+                            <CheckCircle sx={{ fontSize: 48, color: 'success.main', mb: 1 }} />
+                            <Typography variant="h6" color="success.main">
+                              No Interactions Found
+                            </Typography>
+                            <Typography variant="body2" color="text.secondary">
+                              No known interactions between the selected medications
+                            </Typography>
+                          </Box>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </Paper>
+            </Grid>
+
+            {checkInteractions.data.alternatives && checkInteractions.data.alternatives.length > 0 && (
+              <Grid item xs={12}>
+                <Paper sx={{ p: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Suggested Alternatives
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                    {checkInteractions.data.alternatives.map((alt: string, i: number) => (
+                      <Chip key={i} label={alt} color="primary" variant="outlined" />
+                    ))}
+                  </Box>
+                </Paper>
+              </Grid>
+            )}
+
+            {checkInteractions.data.dosage_adjustments && checkInteractions.data.dosage_adjustments.length > 0 && (
+              <Grid item xs={12}>
+                <Paper sx={{ p: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Dosage Adjustments
+                  </Typography>
+                  <Box component="ul" sx={{ pl: 2, m: 0 }}>
+                    {checkInteractions.data.dosage_adjustments.map((adj: string, i: number) => (
+                      <Typography component="li" key={i} variant="body2">
+                        {adj}
+                      </Typography>
+                    ))}
+                  </Box>
+                </Paper>
+              </Grid>
+            )}
+          </Grid>
+        </Box>
       )}
     </Box>
   );

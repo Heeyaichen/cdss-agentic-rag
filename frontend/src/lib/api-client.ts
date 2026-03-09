@@ -1,6 +1,6 @@
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
 import { msalInstance } from './auth';
-import { ApiError } from './types';
+import { ApiError, PatientProfile } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 const API_SCOPE = import.meta.env.VITE_API_SCOPE || '';
@@ -83,7 +83,7 @@ export const clinicalApi = {
   },
 
   getPatient: async (patientId: string) => {
-    return apiClient.get(`/v1/patients/${patientId}`);
+    return apiClient.get<PatientProfile>(`/v1/patients/${patientId}`);
   },
 
   searchPatients: async (params: { search?: string; page?: number; limit?: number }) => {

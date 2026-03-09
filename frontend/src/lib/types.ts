@@ -141,6 +141,8 @@ export interface PubMedArticle {
   mesh_terms: string[];
   doi?: string;
   pmc_id?: string;
+  // Optional relevance score used by search results
+  relevance_score?: number;
 }
 
 export interface LiteratureEvidence {
@@ -175,6 +177,30 @@ export interface AuditLogEntry {
   data_sent_to_llm: boolean;
   phi_fields_sent: string[];
   phi_fields_redacted: string[];
+}
+
+// API Response Types
+export interface SearchLiteratureResponse {
+  papers: PubMedArticle[];
+  total: number;
+  query: string;
+  max_results: number;
+}
+
+export interface SearchProtocolsResponse {
+  matches: ProtocolMatch[];
+  total: number;
+  query: string;
+}
+
+export interface DrugInteractionsResponse {
+  interactions: DrugInteraction[];
+  alternatives: string[];
+  dosage_adjustments: string[];
+  patient_context?: {
+    conditions: string[];
+    medications: string[];
+  };
 }
 
 export interface QueryResponse {
@@ -214,15 +240,102 @@ export interface HealthCheckResponse {
   timestamp: string;
 }
 
+// Generic API error object used across API clients
 export interface ApiError {
-  message: string;
+  code?: string;
+  message?: string;
+  details?: unknown;
+  status?: number;
   status_code?: number;
-  details?: Record<string, unknown>;
 }
 
+// User representation used in auth/store layers
 export interface User {
   id: string;
-  email: string;
+  username?: string;
+  name?: string;
+  email?: string;
+  roles?: string[];
+  [key: string]: unknown;
+}
+
+// ============================================================================
+// PubMed Article - for Literature Search
+// =================================================================
+
+// (Removed duplicate PubMedArticle definition to avoid declaration conflicts.)
+
+export interface LiteratureSearchResponse {
+  papers: PubMedArticle[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface LiteratureSearchRequest {
+  query: string;
+  max_results?: number;
+  date_range?: { start: string; end: string };
+  article_types?: string[];
+}
+
+export interface ProtocolSearchRequest {
+  query: string;
+  specialty?: string;
+  max_results?: number;
+}
+
+export interface protocolSearchResponse {
+  protocols: ProtocolMatch[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// ============================================================================
+// Drug Interaction Response types
+// =================================================================
+export interface MedicationInput {
   name: string;
-  role: 'clinician' | 'pharmacist' | 'admin' | 'auditor';
+  rxcui?: string;
+  dose: string;
+  frequency: string;
+}
+
+export interface DrugInteractionCheckRequest {
+  medications: MedicationInput[];
+  patient_id?: string;
+}
+
+export interface DrugInteractionCheckResponse {
+  interactions: DrugInteraction[];
+  adverse_events: Record<string, unknown>[];
+  alternatives: string[];
+  dosage_adjustments: string[];
+}
+
+// ============================================================================
+// Document Inyestion response
+// =================================================================
+export interface DocumentIngestRequest {
+  file: File;
+  document_type: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DocumentIngestResponse {
+  document_id: string;
+  status: 'pending' | 'processing' | 'completed' | 'error';
+  message: string;
+  estimated_completion_seconds?: number;
+  chunks_count?: number;
+}
+
+// ============================================================================
+// System Health Check
+// ============================================================================
+export interface HealthStatus {
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  latency_ms: number;
+  last_check: string;
 }

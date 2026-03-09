@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import {
   Box,
   Card,
@@ -21,6 +21,16 @@ import { clinicalApi } from '@/lib/api-client';
 import dayjs from 'dayjs';
 
 export default function AdminPage() {
+  // Local type for audit log rows to provide proper typing for rendering
+  type AuditRow = {
+    timestamp: string;
+    event_type: string;
+    actor?: { clinician_id?: string };
+    action: string;
+    resource?: { type?: string };
+    outcome: string;
+    data_sent_to_llm: boolean;
+  };
   const [filters, setFilters] = useState({
     start_date: '',
     end_date: '',
@@ -130,7 +140,7 @@ export default function AdminPage() {
                 </TableCell>
               </TableRow>
             ) : (
-              (auditData || []).slice(0, 50).map((entry: any, i: number) => (
+              (((auditData as AuditRow[]) ?? [] as AuditRow[]).slice(0, 50)).map((entry: AuditRow, i: number) => (
                 <TableRow key={i} hover>
                   <TableCell>
                     {dayjs(entry.timestamp).format('YYYY-MM-DD HH:mm:ss')}

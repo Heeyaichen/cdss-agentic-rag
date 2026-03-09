@@ -10,6 +10,7 @@ const DrugCheckerPage = React.lazy(() => import('@/pages/DrugCheckerPage'));
 const LiteraturePage = React.lazy(() => import('@/pages/LiteraturePage'));
 const DocumentUploadPage = React.lazy(() => import('@/pages/DocumentUploadPage'));
 const AdminPage = React.lazy(() => import('@/pages/AdminPage'));
+const SettingsPage = React.lazy(() => import('@/pages/SettingsPage'));
 
 const LoadingFallback = () => (
   <Box display="flex" justifyContent="center" alignItems="center" minHeight="60vh">
@@ -30,6 +31,8 @@ export default function App() {
           <Route path="/literature" element={<LiteraturePage />} />
           <Route path="/documents" element={<DocumentUploadPage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
     </Layout>
