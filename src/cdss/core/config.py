@@ -185,7 +185,7 @@ class Settings(BaseSettings):
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
     )
     cors_origins: list[str] = Field(
-        default=["http://localhost:3000"],
+        default=["http://localhost:3000", "http://localhost:3001"],
         description="Allowed CORS origins.",
     )
     max_concurrent_agents: int = Field(

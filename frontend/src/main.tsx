@@ -105,7 +105,9 @@ const ThemedApp: React.FC = () => {
 };
 
 async function enableMocking() {
-  if (import.meta.env.DEV) {
+  const useMockApi = import.meta.env.VITE_USE_MOCK_API === 'true';
+  
+  if (import.meta.env.DEV && useMockApi) {
     const { worker } = await import('./mocks/browser');
     return worker.start({
       onUnhandledRequest: 'bypass',

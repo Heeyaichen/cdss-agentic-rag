@@ -64,12 +64,34 @@ export const handlers = [
   }),
 
   http.get(`${API_BASE}/query/stream`, async () => {
-    // SSE streaming is handled separately - return mock response for now
-    await delay(2000);
-    return HttpResponse.json({
-      query_id: 'stream_query_' + Date.now(),
-      status: 'completed',
-      clinical_response: mockClinicalResponse,
+    const sseEvents = [
+      { event: 'processing', data: { status: 'started', message: 'Processing clinical query...', session_id: 'mock-session-' + Date.now() } },
+      { event: 'progress', data: { phase: 'planning', message: 'Analyzing query and creating execution plan...' } },
+      { event: 'agent_result', data: { agent: 'patient_history', summary: 'Retrieved patient profile with 3 active conditions.', sources_retrieved: 3, latency_ms: 450 } },
+      { event: 'agent_result', data: { agent: 'medical_literature', summary: 'Found 8 relevant articles on diabetes and CKD management.', sources_retrieved: 8, latency_ms: 1200 } },
+      { event: 'agent_result', data: { agent: 'protocol', summary: 'Retrieved ADA guidelines for diabetes management.', sources_retrieved: 2, latency_ms: 380 } },
+      { event: 'agent_result', data: { agent: 'drug_safety', summary: 'Identified 1 moderate drug interaction.', sources_retrieved: 4, latency_ms: 520 } },
+      { event: 'complete', data: mockClinicalResponse },
+    ];
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        for (const { event, data } of sseEvents) {
+          await delay(500);
+          const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+          controller.enqueue(encoder.encode(message));
+        }
+        controller.close();
+      },
+    });
+
+    return new HttpResponse(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
     });
   }),
 

@@ -1375,6 +1375,42 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ============================================================================
+// FRONTEND - Azure Static Web Apps
+// ============================================================================
+
+resource staticWebApp 'Microsoft.Web/staticSites@2023-01-01' = {
+  name: '${resourcePrefix}-frontend'
+  location: location
+  tags: tags
+  sku: {
+    name: 'Free'
+    tier: 'Free'
+  }
+  properties: {
+    repositoryUrl: '' // Leave empty for manual deployment
+    branch: 'main'
+    buildProperties: {
+      appLocation: 'frontend'
+      apiLocation: ''
+      outputLocation: 'dist'
+    }
+    provider: 'None' // Manual deployment via CLI
+  }
+}
+
+// Configure Static Web App environment variables
+resource staticWebAppConfig 'Microsoft.Web/staticSites/config@2023-01-01' = {
+  parent: staticWebApp
+  name: 'appsettings'
+  properties: {
+    VITE_USE_MOCK_API: 'false'
+    VITE_API_BASE_URL: containerApp.properties.configuration.ingress.fqdn
+    VITE_AZURE_CLIENT_ID: '' // Add after Azure AD app registration
+    VITE_AZURE_TENANT_ID: subscription().tenantId
+  }
+}
+
+// ============================================================================
 // AI SEARCH INDEX DEFINITIONS
 // ============================================================================
 // Note: Azure AI Search indexes must be created via the REST API or SDK
@@ -1653,6 +1689,15 @@ output keyVaultUri string = keyVault.properties.vaultUri
 @description('Container App URL')
 output containerAppUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
 
+@description('Backend API FQDN')
+output backendUrl string = containerApp.properties.configuration.ingress.fqdn
+
+@description('Static Web App URL (Frontend)')
+output staticWebAppUrl string = 'https://${staticWebApp.properties.defaultHostname}'
+
+@description('Static Web App name')
+output staticWebAppName string = staticWebApp.name
+
 @description('Application Insights instrumentation key')
 output appInsightsKey string = appInsights.properties.InstrumentationKey
 
@@ -1673,3 +1718,9 @@ output redisHostname string = redis.properties.hostName
 
 @description('VNet ID')
 output vnetId string = vnet.id
+
+@description('Resource group name')
+output resourceGroupName string = resourceGroup().name
+
+@description('Environment name')
+output environment string = environment

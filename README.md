@@ -328,7 +328,7 @@ pip install -e ".[dev]"
 az login
 
 # Deploy to development environment
-./infra/scripts/deploy.sh dev my-resource-group
+./infra/scripts/deploy.sh dev cdss-prod-rg
 
 # Seed sample data
 ./infra/scripts/seed-data.sh dev

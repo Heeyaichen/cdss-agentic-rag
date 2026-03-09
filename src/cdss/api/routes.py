@@ -218,6 +218,106 @@ async def submit_clinical_query(
         raise HTTPException(status_code=500, detail=exc.message) from exc
 
 
+@router.get(
+    "/api/v1/query/stream",
+    tags=["Clinical"],
+    summary="Stream clinical query response via GET",
+    description="Stream clinical query response via Server-Sent Events using GET with query parameters. Compatible with EventSource API.",
+)
+async def stream_clinical_query_get(
+    query: str = Query(..., min_length=1, max_length=5000, description="The clinical query text."),
+    patient_id: str | None = Query(None, description="Optional patient ID for context."),
+    session_id: str | None = Query(None, description="Optional session ID for conversation continuity."),
+    service: ClinicalQueryService = Depends(get_query_service),
+) -> StreamingResponse:
+    """Stream clinical query response via Server-Sent Events using GET.
+
+    This endpoint accepts query parameters instead of JSON body to support
+    EventSource API which only supports GET requests.
+
+    Returns a streaming response where each event is a JSON-encoded
+    progress update or partial result.
+    """
+
+    async def event_generator():
+        try:
+            yield _sse_event(
+                "processing",
+                {
+                    "status": "started",
+                    "message": "Processing clinical query...",
+                    "session_id": session_id or str(uuid4()),
+                },
+            )
+
+            yield _sse_event(
+                "progress",
+                {
+                    "phase": "planning",
+                    "message": "Analyzing query and creating execution plan...",
+                },
+            )
+
+            response = await service.process_query(
+                query_text=query,
+                patient_id=patient_id,
+                session_id=session_id,
+            )
+
+            for agent_name, agent_output in response.agent_outputs.items():
+                yield _sse_event(
+                    "agent_result",
+                    {
+                        "agent": agent_name,
+                        "summary": agent_output.summary,
+                        "sources_retrieved": agent_output.sources_retrieved,
+                        "latency_ms": agent_output.latency_ms,
+                    },
+                )
+
+            if response.drug_alerts:
+                yield _sse_event(
+                    "drug_alerts",
+                    {
+                        "alerts": [
+                            {
+                                "severity": alert.severity,
+                                "description": alert.description,
+                                "source": alert.source,
+                            }
+                            for alert in response.drug_alerts
+                        ]
+                    },
+                )
+
+            yield _sse_event(
+                "complete",
+                response.model_dump(mode="json"),
+            )
+
+        except CDSSError as exc:
+            yield _sse_event(
+                "error",
+                {"message": exc.message, "type": type(exc).__name__},
+            )
+        except Exception as exc:
+            logger.error("Stream error", extra={"error": str(exc)}, exc_info=True)
+            yield _sse_event(
+                "error",
+                {"message": "An unexpected error occurred.", "type": "InternalError"},
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post(
     "/api/v1/query/stream",
     tags=["Clinical"],
@@ -237,7 +337,6 @@ async def stream_clinical_query(
     async def event_generator():
         """Generate SSE events for the clinical query."""
         try:
-            # Send initial acknowledgment
             yield _sse_event(
                 "processing",
                 {
@@ -247,7 +346,6 @@ async def stream_clinical_query(
                 },
             )
 
-            # Send planning phase update
             yield _sse_event(
                 "progress",
                 {
@@ -256,14 +354,12 @@ async def stream_clinical_query(
                 },
             )
 
-            # Process the query
             response = await service.process_query(
                 query_text=request.text,
                 patient_id=request.patient_id,
                 session_id=request.session_id,
             )
 
-            # Send agent outputs as individual events
             for agent_name, agent_output in response.agent_outputs.items():
                 yield _sse_event(
                     "agent_result",
@@ -275,7 +371,6 @@ async def stream_clinical_query(
                     },
                 )
 
-            # Send drug alerts if any
             if response.drug_alerts:
                 yield _sse_event(
                     "drug_alerts",
@@ -291,7 +386,6 @@ async def stream_clinical_query(
                     },
                 )
 
-            # Send the final response
             yield _sse_event(
                 "complete",
                 response.model_dump(mode="json"),
@@ -303,9 +397,7 @@ async def stream_clinical_query(
                 {"message": exc.message, "type": type(exc).__name__},
             )
         except Exception as exc:
-            logger.error(
-                "Stream error", extra={"error": str(exc)}, exc_info=True
-            )
+            logger.error("Stream error", extra={"error": str(exc)}, exc_info=True)
             yield _sse_event(
                 "error",
                 {"message": "An unexpected error occurred.", "type": "InternalError"},
@@ -323,15 +415,6 @@ async def stream_clinical_query(
 
 
 def _sse_event(event_type: str, data: dict) -> str:
-    """Format data as a Server-Sent Event string.
-
-    Args:
-        event_type: The SSE event name.
-        data: The event payload to serialize as JSON.
-
-    Returns:
-        A formatted SSE event string.
-    """
     json_data = json.dumps(data, default=str)
     return f"event: {event_type}\ndata: {json_data}\n\n"
 
@@ -530,8 +613,7 @@ async def ingest_document(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Unsupported file type '{content_type}'. "
-                f"Accepted types: {', '.join(sorted(valid_content_types))}."
+                f"Unsupported file type '{content_type}'. Accepted types: {', '.join(sorted(valid_content_types))}."
             ),
         )
 
@@ -541,8 +623,7 @@ async def ingest_document(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid document_type '{document_type}'. "
-                f"Valid types: {', '.join(sorted(valid_document_types))}."
+                f"Invalid document_type '{document_type}'. Valid types: {', '.join(sorted(valid_document_types))}."
             ),
         )
 
@@ -622,9 +703,7 @@ async def _process_document_background(
     try:
         _ingestion_status[document_id]["status"] = "processing"
         _ingestion_status[document_id]["progress"] = 10
-        _ingestion_status[document_id]["updated_at"] = datetime.now(
-            timezone.utc
-        ).isoformat()
+        _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         # Simulate processing stages. In production, this would call:
         # 1. Azure Document Intelligence for text extraction
@@ -635,9 +714,7 @@ async def _process_document_background(
 
         _ingestion_status[document_id]["status"] = "completed"
         _ingestion_status[document_id]["progress"] = 100
-        _ingestion_status[document_id]["updated_at"] = datetime.now(
-            timezone.utc
-        ).isoformat()
+        _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         logger.info(
             "Document processing completed",
@@ -651,9 +728,7 @@ async def _process_document_background(
     except Exception as exc:
         _ingestion_status[document_id]["status"] = "failed"
         _ingestion_status[document_id]["error"] = str(exc)
-        _ingestion_status[document_id]["updated_at"] = datetime.now(
-            timezone.utc
-        ).isoformat()
+        _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         logger.error(
             "Document processing failed",
@@ -715,15 +790,9 @@ async def check_drug_interactions(
     proposed = request.proposed_medications or []
     all_medications.extend(proposed)
 
-    query_text = (
-        f"Check drug-drug interactions for the following medications: "
-        f"{', '.join(request.medications)}."
-    )
+    query_text = f"Check drug-drug interactions for the following medications: {', '.join(request.medications)}."
     if proposed:
-        query_text += (
-            f" Also check interactions with proposed medications: "
-            f"{', '.join(proposed)}."
-        )
+        query_text += f" Also check interactions with proposed medications: {', '.join(proposed)}."
 
     try:
         response = await service.process_query(query_text=query_text)
@@ -845,7 +914,7 @@ async def search_literature(
         return {
             "query": request.query,
             "total_results": len(articles),
-            "articles": articles[:request.max_results],
+            "articles": articles[: request.max_results],
             "evidence_summary": response.evidence_summary,
             "citations": [c.model_dump(mode="json") for c in response.citations],
         }
@@ -933,18 +1002,10 @@ async def health_check() -> dict:
     summary="Get audit trail",
 )
 async def get_audit_trail(
-    patient_id: str | None = Query(
-        None, description="Filter by patient ID."
-    ),
-    date_from: str | None = Query(
-        None, description="Start date filter (ISO 8601)."
-    ),
-    date_to: str | None = Query(
-        None, description="End date filter (ISO 8601)."
-    ),
-    limit: int = Query(
-        100, ge=1, le=1000, description="Max events to return."
-    ),
+    patient_id: str | None = Query(None, description="Filter by patient ID."),
+    date_from: str | None = Query(None, description="Start date filter (ISO 8601)."),
+    date_to: str | None = Query(None, description="End date filter (ISO 8601)."),
+    limit: int = Query(100, ge=1, le=1000, description="Max events to return."),
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> list[dict]:
     """Retrieve the audit trail with optional filtering.
