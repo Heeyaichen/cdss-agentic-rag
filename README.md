@@ -30,13 +30,13 @@ A production-grade clinical decision support platform that orchestrates five spe
   +----+----------+----------+----------+----------+-----------+
        |          |          |          |          |
        v          v          v          v          v
-  +---------+ +---------+ +---------+ +---------+ +-----------+
-  | Patient | | Medical | |Protocol | |  Drug   | |Guardrails |
-  | History | |Literature| | Agent  | | Safety  | |  Agent    |
-  | Agent   | | Agent   | |         | | Agent   | |           |
-  +---------+ +---------+ +---------+ +---------+ +-----------+
-       |          |          |          |          |
-       v          v          v          v          v
+  +---------+ +----------+ +---------+ +---------+ +-----------+
+  | Patient | | Medical  | |Protocol | |  Drug   | |Guardrails |
+  | History | |Literature| | Agent   | | Safety  | |  Agent    |
+  | Agent   | | Agent    | |         | | Agent   | |           |
+  +---------+ +----------+ +---------+ +---------+ +-----------+
+       |          |            |          |          |
+       v          v            v          v          v
   +---------+ +---------+ +---------+ +---------+ +------------+
   |Azure AI | | PubMed  | |Azure AI | |DrugBank | | Citation   |
   | Search  | |  API    | | Search  | |OpenFDA  | |Verification|
