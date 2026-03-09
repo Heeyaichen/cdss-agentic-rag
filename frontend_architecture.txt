@@ -1,0 +1,323 @@
+Frontend Development Prompt for CDSS Clinical Decision Support System
+Project Context
+Build a production-grade, interactive web frontend for a Clinical Decision Support System (CDSS) that integrates with an existing Azure-hosted FastAPI backend. The system orchestrates 5 specialized AI agents to provide evidence-based clinical recommendations.
+
+Backend Architecture (Already Deployed)
+API Base: FastAPI REST API on Azure App Service
+
+Authentication: Azure Entra ID (OAuth 2.0)
+
+Key Endpoints:
+
+POST /api/v1/query - Submit clinical queries
+
+POST /api/v1/query/stream - Streaming responses (SSE)
+
+GET /api/v1/patients/{id} - Patient profiles
+
+POST /api/v1/drugs/interactions - Drug interaction checks
+
+POST /api/v1/search/literature - PubMed search
+
+POST /api/v1/documents/ingest - Document upload
+
+GET /api/v1/audit - Audit trail (admin only)
+
+Frontend Requirements
+1. Technology Stack
+Framework: React 18+ with TypeScript
+
+UI Library: Material-UI (MUI) v5 or Ant Design (medical-grade aesthetics)
+
+State Management: React Query (TanStack Query) for API calls + Zustand for global state
+
+Routing: React Router v6
+
+Forms: React Hook Form + Zod validation
+
+Charts: Recharts or Chart.js for lab results visualization
+
+Real-time: EventSource API for SSE streaming responses
+
+Build Tool: Vite
+
+Styling: Tailwind CSS + component library
+
+2. Core Features to Implement
+A. Clinical Query Interface
+Natural language input with autocomplete for common clinical questions
+
+Patient selector dropdown (loads from /api/v1/patients)
+
+Real-time streaming of agent responses with progress indicators
+
+Citation display with expandable PubMed abstracts
+
+Drug alerts prominently displayed with severity badges
+
+Confidence score visualization (gauge chart)
+
+Export to PDF functionality for clinical notes
+
+B. Patient Dashboard
+Patient profile viewer with demographics, active conditions, medications, allergies
+
+Lab results timeline with trend charts (HbA1c, eGFR, etc.)
+
+Medication list with interaction warnings
+
+Document viewer for uploaded PDFs (lab reports, prescriptions)
+
+C. Drug Interaction Checker
+Multi-drug selector with RxNorm autocomplete
+
+Interaction matrix visualization (heatmap)
+
+Severity-based filtering (minor/moderate/major)
+
+Alternative suggestions from backend
+
+D. Medical Literature Search
+Advanced search form with filters (date range, article types)
+
+Results grid with relevance scores
+
+Abstract preview modal
+
+Save to favorites functionality
+
+E. Document Ingestion
+Drag-and-drop upload for PDFs/images
+
+Processing status with progress bar
+
+OCR confidence display
+
+Extracted entities visualization (medications, conditions, labs)
+
+F. Admin Panel (Role-Based)
+Audit log viewer with filtering and search
+
+User management (if applicable)
+
+System health dashboard (API latency, agent performance)
+
+3. Azure Hosting Recommendation
+Deploy to Azure Static Web Apps (Recommended)
+
+Why:
+
+Native integration with Azure App Service backend
+
+Built-in Azure AD authentication
+
+Global CDN distribution
+
+Free SSL certificates
+
+CI/CD via GitHub Actions
+
+Staging environments
+
+API proxy to backend (avoids CORS)
+
+Alternative: Azure App Service (Linux container with Nginx)
+
+4. Authentication Flow
+// Use MSAL.js (Microsoft Authentication Library)
+import { PublicClientApplication } from "@azure/msal-browser";
+
+const msalConfig = {
+  auth: {
+    clientId: process.env.VITE_AZURE_CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${process.env.VITE_AZURE_TENANT_ID}`,
+    redirectUri: window.location.origin,
+  },
+};
+
+const msalInstance = new PublicClientApplication(msalConfig);
+
+Copy
+
+Insert at cursor
+5. Key UI/UX Requirements
+HIPAA-compliant design: No PHI in URLs, session timeout warnings, audit trail for all actions
+
+Accessibility: WCAG 2.1 AA compliance (keyboard navigation, screen reader support)
+
+Responsive: Mobile-first design (tablet/desktop optimized)
+
+Loading states: Skeleton screens, shimmer effects during API calls
+
+Error handling: User-friendly error messages with retry options
+
+Offline support: Service worker for basic functionality
+
+Dark mode: Toggle for clinician preference
+
+6. Critical Integration Points
+API Client Setup
+// src/lib/api-client.ts
+import axios from 'axios';
+import { msalInstance } from './auth';
+
+const apiClient = axios.create({
+  baseURL: process.env.VITE_API_BASE_URL,
+  timeout: 30000,
+});
+
+apiClient.interceptors.request.use(async (config) => {
+  const account = msalInstance.getAllAccounts()[0];
+  const response = await msalInstance.acquireTokenSilent({
+    scopes: [`${process.env.VITE_API_SCOPE}`],
+    account,
+  });
+  config.headers.Authorization = `Bearer ${response.accessToken}`;
+  return config;
+});
+
+Copy
+
+Insert at cursor
+typescript
+Streaming Response Handler
+// src/hooks/useStreamingQuery.ts
+const useStreamingQuery = (query: string, patientId?: string) => {
+  const [response, setResponse] = useState<ClinicalResponse | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  const startStream = async () => {
+    const eventSource = new EventSource(
+      `/api/v1/query/stream?query=${encodeURIComponent(query)}&patient_id=${patientId}`
+    );
+    
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      setResponse((prev) => ({ ...prev, ...data }));
+    };
+    
+    eventSource.onerror = () => {
+      eventSource.close();
+      setIsStreaming(false);
+    };
+  };
+
+  return { response, isStreaming, startStream };
+};
+
+Copy
+
+Insert at cursor
+typescript
+7. Project Structure
+frontend/
+├── src/
+│   ├── components/
+│   │   ├── clinical/
+│   │   │   ├── QueryInterface.tsx
+│   │   │   ├── ResponseViewer.tsx
+│   │   │   ├── CitationCard.tsx
+│   │   │   └── DrugAlertBanner.tsx
+│   │   ├── patient/
+│   │   │   ├── PatientProfile.tsx
+│   │   │   ├── LabResultsChart.tsx
+│   │   │   └── MedicationList.tsx
+│   │   ├── drugs/
+│   │   │   ├── InteractionChecker.tsx
+│   │   │   └── InteractionMatrix.tsx
+│   │   ├── literature/
+│   │   │   ├── SearchForm.tsx
+│   │   │   └── ResultsGrid.tsx
+│   │   └── common/
+│   │       ├── Layout.tsx
+│   │       ├── Navbar.tsx
+│   │       └── ErrorBoundary.tsx
+│   ├── pages/
+│   │   ├── Dashboard.tsx
+│   │   ├── QueryPage.tsx
+│   │   ├── PatientPage.tsx
+│   │   ├── DrugCheckerPage.tsx
+│   │   ├── LiteraturePage.tsx
+│   │   └── AdminPage.tsx
+│   ├── hooks/
+│   │   ├── useAuth.ts
+│   │   ├── useStreamingQuery.ts
+│   │   └── usePatientData.ts
+│   ├── lib/
+│   │   ├── api-client.ts
+│   │   ├── auth.ts
+│   │   └── types.ts
+│   ├── stores/
+│   │   └── userStore.ts
+│   ├── App.tsx
+│   └── main.tsx
+├── public/
+├── .env.example
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+└── README.md
+
+
+Copy
+
+Insert at cursor
+8. Environment Variables (.env)
+VITE_API_BASE_URL=https://your-backend.azurewebsites.net
+VITE_AZURE_CLIENT_ID=<your-client-id>
+VITE_AZURE_TENANT_ID=<your-tenant-id>
+VITE_API_SCOPE=api://<your-api-scope>/access_as_user
+
+Copy
+
+Insert at cursor
+bash
+9. Deployment Steps
+# Build for production
+npm run build
+
+# Deploy to Azure Static Web Apps (via Azure CLI)
+az staticwebapp create \
+  --name cdss-frontend \
+  --resource-group my-resource-group \
+  --source ./dist \
+  --location eastus2 \
+  --branch main \
+  --app-location "/" \
+  --api-location "" \
+  --output-location "dist"
+
+Copy
+
+Insert at cursor
+10. Success Criteria
+ All 9 API endpoints integrated with proper error handling
+ Azure AD authentication working end-to-end
+ Streaming responses display in real-time
+ Patient data loads and displays correctly
+ Drug interaction checker functional
+ Document upload with progress tracking
+ Responsive design (mobile/tablet/desktop)
+ Accessibility audit passes (Lighthouse score >90)
+ Deployed to Azure Static Web Apps with HTTPS
+ CI/CD pipeline configured (GitHub Actions)
+Build Instructions for GLM-5 Agent
+Start by:
+
+Initialize React + TypeScript + Vite project
+
+Install dependencies (MUI, React Query, MSAL, Axios, Recharts)
+
+Set up Azure AD authentication with MSAL
+
+Create API client with interceptors
+
+Build QueryInterface component with streaming support
+
+Implement remaining pages incrementally
+
+Configure Azure Static Web Apps deployment
+
+Prioritize: Clinical Query Interface → Patient Dashboard → Drug Checker → Literature Search → Document Upload → Admin Panel
+
+
