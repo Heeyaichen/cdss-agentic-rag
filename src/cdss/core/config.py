@@ -180,6 +180,10 @@ class Settings(BaseSettings):
         default=False,
         description="Enable debug mode with verbose logging.",
     )
+    use_mock_mode: bool = Field(
+        default=False,
+        description="Enable mock mode for local testing without Azure services.",
+    )
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
@@ -196,10 +200,26 @@ class Settings(BaseSettings):
         default=30,
         description="Maximum seconds to wait for a complete agent response.",
     )
-    confidence_threshold: float = Field(
-        default=0.6,
-        description="Minimum confidence score to accept a clinical recommendation.",
-    )
+
+    # -----------------------------------------------------------------
+    # Alias properties for backward compatibility
+    # cosmos_client.py expects cosmos_db_endpoint, cosmos_db_key, cosmos_db_database_name
+    # -----------------------------------------------------------------
+
+    @property
+    def cosmos_db_endpoint(self) -> str:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_cosmos_endpoint
+
+    @property
+    def cosmos_db_key(self) -> str:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_cosmos_key
+
+    @property
+    def cosmos_db_database_name(self) -> str:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_cosmos_database_name
 
 
 @lru_cache(maxsize=1)

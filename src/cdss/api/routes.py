@@ -425,6 +425,76 @@ def _sse_event(event_type: str, data: dict) -> str:
 
 
 @router.get(
+    "/api/v1/patients",
+    tags=["Patients"],
+    summary="Search patients",
+)
+async def search_patients(
+    search: str | None = Query(None, description="Search query string."),
+    page: int = Query(1, ge=1, le=100, description="Page number."),
+    limit: int = Query(100, description="Maximum results per page."),
+    service: ClinicalQueryService = Depends(get_query_service),
+) -> dict:
+    """Search patients by name and other criteria.
+
+    Args:
+        search: Search query string.
+        page: Page number.
+        limit: Maximum results per page.
+        service: Injected query service.
+
+    Returns:
+        Dictionary with pagination metadata and patient list.
+    """
+    # Mock data for local testing without Azure services
+    mock_patients = [
+        {
+            "patient_id": "patient_001",
+            "name": "John Smith",
+            "age": 65,
+            "gender": "male",
+            "conditions": ["Type 2 Diabetes", "Hypertension"],
+            "medications": [
+                {"name": "Metformin", "dose": "500mg", "frequency": "BID"},
+                {"name": "Lisinopril", "dose": "10mg", "frequency": "QD"},
+            ],
+            "allergies": ["Penicillin"],
+        },
+        {
+            "patient_id": "patient_002",
+            "name": "Jane Doe",
+            "age": 58,
+            "gender": "female",
+            "conditions": ["CKD Stage 3", "Hyperlipidemia"],
+            "medications": [
+                {"name": "Empagliflozin", "dose": "10mg", "frequency": "QD"},
+            ],
+            "allergies": [],
+        },
+    ]
+
+    # Filter by search query if provided
+    filtered_patients = mock_patients
+    if search:
+        search_lower = search.lower()
+        filtered_patients = [
+            p for p in mock_patients if search_lower in p["name"].lower() or any(c.lower() for c in p["conditions"])
+        ]
+
+    # Pagination
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+    paginated_patients = filtered_patients[start_idx:end_idx]
+
+    return {
+        "patients": paginated_patients,
+        "page": page,
+        "limit": limit,
+        "total": len(filtered_patients),
+    }
+
+
+@router.get(
     "/api/v1/patients/{patient_id}",
     tags=["Patients"],
     summary="Get patient profile",
