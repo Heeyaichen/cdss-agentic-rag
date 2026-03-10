@@ -29,7 +29,7 @@ RUN apt-get update && \
 WORKDIR /build
 
 # Copy only dependency specification first (Docker cache optimization)
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 
 # Install dependencies into a virtual environment
 RUN python -m venv /opt/venv
@@ -87,7 +87,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 ENTRYPOINT ["tini", "--"]
 
 # Run the FastAPI application with uvicorn
-CMD ["uvicorn", "cdss.api.main:app", \
+CMD ["uvicorn", "cdss.api.app:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--workers", "4", \

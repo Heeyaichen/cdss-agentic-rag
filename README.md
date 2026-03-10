@@ -327,11 +327,14 @@ pip install -e ".[dev]"
 # Login to Azure
 az login
 
-# Deploy to development environment
-./infra/scripts/deploy.sh dev cdss-prod-rg
+# Deploy to production environment
+./infra/scripts/deploy.sh prod cdss-prod-rg
+
+# Populate Environment Files from Azure Resources
+./infra/scripts/populate-env.sh prod cdss-prod-rg
 
 # Seed sample data
-./infra/scripts/seed-data.sh dev
+./infra/scripts/seed-data.sh prod
 ```
 
 ### 5. Run locally

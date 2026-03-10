@@ -3,29 +3,29 @@
 
 set -euo pipefail
 
-RG="${1:-my-resource-group}"
+RG="${1:-cdss-prod-rg}"
 
 echo "Fetching Azure resource details from: $RG"
 
 # Get resource names
-COSMOS=$(az cosmosdb list -g $RG --query "[0].name" -o tsv)
-SEARCH=$(az search service list -g $RG --query "[0].name" -o tsv)
-OPENAI=$(az cognitiveservices account list -g $RG --query "[?kind=='OpenAI'].name" -o tsv)
-DOCINTEL=$(az cognitiveservices account list -g $RG --query "[?kind=='FormRecognizer'].name" -o tsv)
-STORAGE=$(az storage account list -g $RG --query "[?tags.project=='cdss-agentic-rag'].name" -o tsv | head -1)
+COSMOS=$(az cosmosdb list --resource-group "$RG" --query "[0].name" -o tsv)
+SEARCH=$(az search service list --resource-group "$RG" --query "[0].name" -o tsv)
+OPENAI=$(az cognitiveservices account list --resource-group "$RG" --query "[?kind=='OpenAI'].name" -o tsv | head -1)
+DOCINTEL=$(az cognitiveservices account list --resource-group "$RG" --query "[?kind=='FormRecognizer'].name" -o tsv | head -1)
+STORAGE=$(az storage account list --resource-group "$RG" --query "[?tags.project=='cdss-agentic-rag'].name" -o tsv | head -1)
 
 # Get endpoints
-COSMOS_EP=$(az cosmosdb show -n $COSMOS -g $RG --query documentEndpoint -o tsv)
+COSMOS_EP=$(az cosmosdb show --name "$COSMOS" --resource-group "$RG" --query documentEndpoint -o tsv)
 SEARCH_EP="https://$SEARCH.search.windows.net"
-OPENAI_EP=$(az cognitiveservices account show -n $OPENAI -g $RG --query properties.endpoint -o tsv)
-DOCINTEL_EP=$(az cognitiveservices account show -n $DOCINTEL -g $RG --query properties.endpoint -o tsv)
+OPENAI_EP=$(az cognitiveservices account show --name "$OPENAI" --resource-group "$RG" --query properties.endpoint -o tsv)
+DOCINTEL_EP=$(az cognitiveservices account show --name "$DOCINTEL" --resource-group "$RG" --query properties.endpoint -o tsv)
 
 # Get keys
-COSMOS_KEY=$(az cosmosdb keys list -n $COSMOS -g $RG --query primaryMasterKey -o tsv)
-SEARCH_KEY=$(az search admin-key show --service-name $SEARCH -g $RG --query primaryKey -o tsv)
-OPENAI_KEY=$(az cognitiveservices account keys list -n $OPENAI -g $RG --query key1 -o tsv)
-DOCINTEL_KEY=$(az cognitiveservices account keys list -n $DOCINTEL -g $RG --query key1 -o tsv)
-STORAGE_CONN=$(az storage account show-connection-string -n $STORAGE -g $RG --query connectionString -o tsv)
+COSMOS_KEY=$(az cosmosdb keys list --name "$COSMOS" --resource-group "$RG" --query primaryMasterKey -o tsv)
+SEARCH_KEY=$(az search admin-key show --service-name "$SEARCH" --resource-group "$RG" --query primaryKey -o tsv)
+OPENAI_KEY=$(az cognitiveservices account keys list --name "$OPENAI" --resource-group "$RG" --query key1 -o tsv)
+DOCINTEL_KEY=$(az cognitiveservices account keys list --name "$DOCINTEL" --resource-group "$RG" --query key1 -o tsv)
+STORAGE_CONN=$(az storage account show-connection-string --name "$STORAGE" --resource-group "$RG" --query connectionString -o tsv)
 
 # Create .env.azure (for seed-data.sh)
 cat > .env.azure << EOF

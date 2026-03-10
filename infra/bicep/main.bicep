@@ -485,7 +485,7 @@ resource documentIntelligence 'Microsoft.CognitiveServices/accounts@2024-04-01-p
   tags: tags
   kind: 'FormRecognizer'
   sku: {
-    name: environment == 'prod' ? 'S0' : 'F0'
+    name: environment == 'prod' ? 'S0' : 'S0'
   }
   properties: {
     customSubDomainName: docIntelligenceName

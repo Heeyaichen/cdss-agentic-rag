@@ -48,8 +48,7 @@ docker-compose.yml
 docker-compose.*.yml
 .dockerignore
 
-# Documentation (not needed in container)
-*.md
+# Documentation (not needed in container except README.md)
 docs/
 LICENSE
 

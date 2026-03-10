@@ -31,11 +31,15 @@ services:
       - AZURE_OPENAI_GPT4O_DEPLOYMENT=gpt-4o
       - AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT=gpt-4o-mini
       - AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
-      # Cosmos DB Emulator
-      - AZURE_COSMOS_ENDPOINT=https://cosmos-emulator:8081
-      - AZURE_COSMOS_KEY=C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==
-      - AZURE_COSMOS_DATABASE=cdss-db
-      - AZURE_COSMOS_DISABLE_SSL_VERIFICATION=true
+      # Cosmos DB - Use deployed Azure Cosmos DB (emulator not supported on ARM64)
+      - AZURE_COSMOS_ENDPOINT=${AZURE_COSMOS_ENDPOINT:-}
+      - AZURE_COSMOS_KEY=${AZURE_COSMOS_KEY:-}
+      - AZURE_COSMOS_DATABASE=${AZURE_COSMOS_DATABASE:-cdss-db}
+      # Cosmos DB Emulator (commented out - not supported on ARM64/Apple Silicon)
+      # - AZURE_COSMOS_ENDPOINT=https://cosmos-emulator:8081
+      # - AZURE_COSMOS_KEY=C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==
+      # - AZURE_COSMOS_DATABASE=cdss-db
+      # - AZURE_COSMOS_DISABLE_SSL_VERIFICATION=true
       # Azure AI Search (use actual endpoint or mock)
       - AZURE_SEARCH_ENDPOINT=${AZURE_SEARCH_ENDPOINT:-http://localhost:8080}
       - AZURE_SEARCH_API_KEY=${AZURE_SEARCH_API_KEY:-dev-key}
@@ -51,12 +55,12 @@ services:
     volumes:
       - ./src:/app/src:ro
     depends_on:
-      cosmos-emulator:
-        condition: service_healthy
+      # cosmos-emulator:  # Commented out - not supported on ARM64
+      #   condition: service_healthy
       redis:
         condition: service_healthy
-      azurite:
-        condition: service_healthy
+      # azurite:  # Commented out - optional for local testing
+      #   condition: service_healthy
     networks:
       - cdss-network
     restart: unless-stopped
@@ -68,35 +72,35 @@ services:
       start_period: 30s
 
   # --------------------------------------------------------------------------
-  # Azure Cosmos DB Emulator
+  # Azure Cosmos DB Emulator (commented out - not supported on ARM64/Apple Silicon)
   # --------------------------------------------------------------------------
-  cosmos-emulator:
-    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
-    container_name: cosmos-emulator
-    ports:
-      - "8081:8081"
-      - "10250:10250"
-      - "10251:10251"
-      - "10252:10252"
-      - "10253:10253"
-      - "10254:10254"
-    environment:
-      - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=10
-      - AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=true
-      - AZURE_COSMOS_EMULATOR_IP_ADDRESS_OVERRIDE=0.0.0.0
-    volumes:
-      - cosmos-data:/tmp/cosmos/appdata
-    networks:
-      - cdss-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsk https://localhost:8081/_explorer/emulator.pem || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-    mem_limit: 3g
-    cpu_count: 2
+  # cosmos-emulator:
+  #   image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+  #   container_name: cosmos-emulator
+  #   ports:
+  #     - "8081:8081"
+  #     - "10250:10250"
+  #     - "10251:10251"
+  #     - "10252:10252"
+  #     - "10253:10253"
+  #     - "10254:10254"
+  #   environment:
+  #     - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=10
+  #     - AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=true
+  #     - AZURE_COSMOS_EMULATOR_IP_ADDRESS_OVERRIDE=0.0.0.0
+  #   volumes:
+  #     - cosmos-data:/tmp/cosmos/appdata
+  #   networks:
+  #     - cdss-network
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -fsk https://localhost:8081/_explorer/emulator.pem || exit 1"]
+  #     interval: 15s
+  #     timeout: 10s
+  #     retries: 10
+  #     start_period: 120s
+  #   mem_limit: 3g
+  #   cpu_count: 2
 
   # --------------------------------------------------------------------------
   # Redis - Caching Layer
@@ -170,8 +174,8 @@ networks:
 # Volumes
 # --------------------------------------------------------------------------
 volumes:
-  cosmos-data:
-    name: cdss-cosmos-data
+  # cosmos-data:  # Commented out - emulator not supported on ARM64
+  #   name: cdss-cosmos-data
   redis-data:
     name: cdss-redis-data
   azurite-data:
