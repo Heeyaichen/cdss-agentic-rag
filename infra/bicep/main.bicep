@@ -31,6 +31,24 @@ param gpt4oMiniDeploymentName string = 'gpt-4o-mini'
 @description('Azure OpenAI text-embedding-3-large deployment name')
 param embeddingDeploymentName string = 'text-embedding-3-large'
 
+@description('Azure OpenAI GPT-4o deployment capacity (in thousands TPM units)')
+@minValue(1)
+param gpt4oCapacity int = environment == 'prod' ? 80 : 20
+
+@description('Azure OpenAI GPT-4o-mini deployment capacity (in thousands TPM units)')
+@minValue(1)
+param gpt4oMiniCapacity int = environment == 'prod' ? 120 : 40
+
+@description('Azure OpenAI embedding deployment capacity (in thousands TPM units)')
+@minValue(1)
+param embeddingCapacity int = environment == 'prod' ? 120 : 40
+
+@description('Set to true to restore a soft-deleted Azure OpenAI account with the same name')
+param openaiRestore bool = false
+
+@description('Set to true to restore a soft-deleted Document Intelligence account with the same name')
+param docIntelRestore bool = false
+
 @description('Cosmos DB database name')
 param cosmosDatabaseName string = 'cdss-db'
 
@@ -387,6 +405,7 @@ resource openai 'Microsoft.CognitiveServices/accounts@2024-04-01-preview' = {
     name: 'S0'
   }
   properties: {
+    restore: openaiRestore
     customSubDomainName: openaiName
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
     networkAcls: {
@@ -400,7 +419,7 @@ resource gpt4oDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
   name: gpt4oDeploymentName
   sku: {
     name: 'Standard'
-    capacity: environment == 'prod' ? 80 : 20
+    capacity: gpt4oCapacity
   }
   properties: {
     model: {
@@ -420,7 +439,7 @@ resource gpt4oMiniDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
   ]
   sku: {
     name: 'Standard'
-    capacity: environment == 'prod' ? 120 : 40
+    capacity: gpt4oMiniCapacity
   }
   properties: {
     model: {
@@ -440,7 +459,7 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
   ]
   sku: {
     name: 'Standard'
-    capacity: environment == 'prod' ? 120 : 40
+    capacity: embeddingCapacity
   }
   properties: {
     model: {
@@ -488,6 +507,7 @@ resource documentIntelligence 'Microsoft.CognitiveServices/accounts@2024-04-01-p
     name: environment == 'prod' ? 'S0' : 'S0'
   }
   properties: {
+    restore: docIntelRestore
     customSubDomainName: docIntelligenceName
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
     networkAcls: {

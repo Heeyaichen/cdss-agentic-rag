@@ -74,6 +74,9 @@ BICEP_DIR="${SCRIPT_DIR}/../bicep"
 BICEP_FILE="${BICEP_DIR}/main.bicep"
 PARAMS_FILE="${BICEP_DIR}/parameters.${ENVIRONMENT}.json"
 DEPLOYMENT_NAME="cdss-${ENVIRONMENT}-$(date +%Y%m%d%H%M%S)"
+EXTRA_BICEP_PARAMS=""
+OPENAI_RESTORE_ENABLED="false"
+DOCINTEL_RESTORE_ENABLED="false"
 
 # --- Preflight checks ---
 log_info "Running preflight checks..."
@@ -145,18 +148,93 @@ fi
 
 # --- Validate Bicep template ---
 log_info "Validating Bicep template..."
-VALIDATE_CMD="az deployment group validate \
-    --resource-group ${RESOURCE_GROUP} \
-    --template-file ${BICEP_FILE} \
-    --parameters environment=${ENVIRONMENT} location=${LOCATION}"
+refresh_extra_bicep_params() {
+    EXTRA_BICEP_PARAMS=""
 
-if [[ -n "${PARAMS_FILE}" ]]; then
-    VALIDATE_CMD="${VALIDATE_CMD} --parameters @${PARAMS_FILE}"
-fi
+    if [[ "$OPENAI_RESTORE_ENABLED" == "true" ]]; then
+        EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} openaiRestore=true"
+    fi
 
-if eval "$VALIDATE_CMD" --output none 2>&1; then
+    if [[ "$DOCINTEL_RESTORE_ENABLED" == "true" ]]; then
+        EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} docIntelRestore=true"
+    fi
+
+    EXTRA_BICEP_PARAMS="$(echo "$EXTRA_BICEP_PARAMS" | xargs)"
+}
+
+run_validate() {
+    local cmd="az deployment group validate \
+        --resource-group ${RESOURCE_GROUP} \
+        --template-file ${BICEP_FILE} \
+        --parameters environment=${ENVIRONMENT} location=${LOCATION}"
+
+    if [[ -n "${PARAMS_FILE}" ]]; then
+        cmd="${cmd} --parameters @${PARAMS_FILE}"
+    fi
+
+    if [[ -n "${EXTRA_BICEP_PARAMS}" ]]; then
+        cmd="${cmd} --parameters ${EXTRA_BICEP_PARAMS}"
+    fi
+
+    eval "$cmd" --output none 2>&1
+}
+
+refresh_extra_bicep_params
+for _ in 1 2 3; do
+    set +e
+    VALIDATE_OUTPUT=$(run_validate)
+    VALIDATE_STATUS=$?
+    set -e
+
+    if [[ $VALIDATE_STATUS -eq 0 ]]; then
+        break
+    fi
+
+    if [[ "$VALIDATE_OUTPUT" != *"FlagMustBeSetForRestore"* ]]; then
+        break
+    fi
+
+    if [[ "$VALIDATE_OUTPUT" == *"docintel"* || "$VALIDATE_OUTPUT" == *"FormRecognizer"* ]]; then
+        if [[ "$DOCINTEL_RESTORE_ENABLED" != "true" ]]; then
+            log_warn "Detected a soft-deleted Document Intelligence account with the same name."
+            log_warn "Retrying validation with docIntelRestore=true..."
+            DOCINTEL_RESTORE_ENABLED="true"
+            refresh_extra_bicep_params
+            continue
+        fi
+    fi
+
+    if [[ "$VALIDATE_OUTPUT" == *"oai"* || "$VALIDATE_OUTPUT" == *"OpenAI"* ]]; then
+        if [[ "$OPENAI_RESTORE_ENABLED" != "true" ]]; then
+            log_warn "Detected a soft-deleted Azure OpenAI account with the same name."
+            log_warn "Retrying validation with openaiRestore=true..."
+            OPENAI_RESTORE_ENABLED="true"
+            refresh_extra_bicep_params
+            continue
+        fi
+    fi
+
+    if [[ "$OPENAI_RESTORE_ENABLED" != "true" ]]; then
+        log_warn "Detected a soft-deleted AI account. Retrying validation with openaiRestore=true..."
+        OPENAI_RESTORE_ENABLED="true"
+        refresh_extra_bicep_params
+        continue
+    fi
+
+    if [[ "$DOCINTEL_RESTORE_ENABLED" != "true" ]]; then
+        log_warn "Detected a soft-deleted AI account. Retrying validation with docIntelRestore=true..."
+        DOCINTEL_RESTORE_ENABLED="true"
+        refresh_extra_bicep_params
+        continue
+    fi
+
+    break
+done
+
+if [[ $VALIDATE_STATUS -eq 0 ]]; then
     log_success "Template validation passed."
 else
+    echo "$VALIDATE_OUTPUT"
     log_error "Template validation failed. Fix the errors above and retry."
     exit 1
 fi
@@ -170,6 +248,10 @@ WHATIF_CMD="az deployment group what-if \
 
 if [[ -n "${PARAMS_FILE}" ]]; then
     WHATIF_CMD="${WHATIF_CMD} --parameters @${PARAMS_FILE}"
+fi
+
+if [[ -n "${EXTRA_BICEP_PARAMS}" ]]; then
+    WHATIF_CMD="${WHATIF_CMD} --parameters ${EXTRA_BICEP_PARAMS}"
 fi
 
 eval "$WHATIF_CMD" 2>&1 || true
@@ -197,6 +279,10 @@ if [[ -n "${PARAMS_FILE}" ]]; then
     DEPLOY_CMD="${DEPLOY_CMD} --parameters @${PARAMS_FILE}"
 fi
 
+if [[ -n "${EXTRA_BICEP_PARAMS}" ]]; then
+    DEPLOY_CMD="${DEPLOY_CMD} --parameters ${EXTRA_BICEP_PARAMS}"
+fi
+
 DEPLOY_OUTPUT=$(eval "$DEPLOY_CMD" --output json 2>&1)
 DEPLOY_STATUS=$?
 
@@ -222,6 +308,12 @@ if [[ $DEPLOY_STATUS -ne 0 ]]; then
 fi
 
 log_success "Deployment completed successfully!"
+if [[ "$OPENAI_RESTORE_ENABLED" == "true" ]]; then
+    log_warn "Azure OpenAI was deployed in restore mode due to soft-delete detection."
+fi
+if [[ "$DOCINTEL_RESTORE_ENABLED" == "true" ]]; then
+    log_warn "Document Intelligence was deployed in restore mode due to soft-delete detection."
+fi
 
 # --- Fetch resource details directly from Azure ---
 log_info "Fetching deployed resource details..."
