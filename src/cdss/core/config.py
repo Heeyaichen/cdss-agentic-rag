@@ -82,6 +82,10 @@ class Settings(BaseSettings):
         default="",
         description="Azure Cosmos DB primary key.",
     )
+    azure_cosmos_use_entra_id: bool = Field(
+        default=False,
+        description="Use Azure Entra ID (DefaultAzureCredential) for Cosmos DB auth instead of account key.",
+    )
     azure_cosmos_database_name: str = Field(
         default="cdss_db",
         description="Cosmos DB database name.",
@@ -127,6 +131,14 @@ class Settings(BaseSettings):
     azure_blob_connection_string: str = Field(
         default="",
         description="Azure Blob Storage connection string.",
+    )
+    azure_blob_endpoint: str = Field(
+        default="",
+        description="Azure Blob Storage endpoint URL (for Entra ID auth).",
+    )
+    azure_blob_use_entra_id: bool = Field(
+        default=False,
+        description="Use Azure Entra ID (DefaultAzureCredential) for Blob Storage auth instead of connection string.",
     )
     azure_blob_protocols_container: str = Field(
         default="protocols",
@@ -220,6 +232,30 @@ class Settings(BaseSettings):
     def cosmos_db_database_name(self) -> str:
         """Alias for backward compatibility with legacy code."""
         return self.azure_cosmos_database_name
+
+    @property
+    def cosmos_db_use_entra_id(self) -> bool:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_cosmos_use_entra_id
+
+    @property
+    def keyvault_url(self) -> str:
+        return self.azure_key_vault_url
+
+    @property
+    def blob_storage_connection_string(self) -> str:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_blob_connection_string
+
+    @property
+    def blob_storage_endpoint(self) -> str:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_blob_endpoint
+
+    @property
+    def blob_storage_use_entra_id(self) -> bool:
+        """Alias for backward compatibility with legacy code."""
+        return self.azure_blob_use_entra_id
 
 
 @lru_cache(maxsize=1)

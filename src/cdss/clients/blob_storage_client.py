@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from azure.core.credentials import TokenCredential
+from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
 from cdss.core.config import Settings, get_settings
@@ -13,7 +15,6 @@ from cdss.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Default container for treatment protocols
 PROTOCOLS_CONTAINER = "treatment-protocols"
 
 
@@ -22,43 +23,73 @@ class BlobStorageClient:
 
     Provides upload, download, listing, and deletion of treatment
     protocol documents stored as blobs in a dedicated container.
+    Supports both connection string and Entra ID authentication.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
-        """Initialize Azure Blob Storage client.
-
-        Args:
-            settings: Application settings. If None, loads from environment.
-        """
         self._settings = settings or get_settings()
 
         try:
-            self._service_client = BlobServiceClient.from_connection_string(
-                self._settings.blob_storage_connection_string
-            )
+            credential: str | TokenCredential
+            auth_mode = "connection_string"
+
+            if self._settings.azure_blob_use_entra_id or not self._settings.azure_blob_connection_string:
+                credential = DefaultAzureCredential()
+                auth_mode = "entra_id"
+
+                account_url = self._settings.azure_blob_endpoint
+                if not account_url:
+                    account_name = self._extract_account_name_from_connection_string(
+                        self._settings.azure_blob_connection_string
+                    )
+                    if account_name:
+                        account_url = f"https://{account_name}.blob.core.windows.net"
+
+                if not account_url:
+                    raise AzureServiceError(
+                        "Blob Storage endpoint required for Entra ID auth. "
+                        "Set CDSS_AZURE_BLOB_ENDPOINT or CDSS_AZURE_BLOB_CONNECTION_STRING."
+                    )
+
+                self._service_client = BlobServiceClient(
+                    account_url=account_url,
+                    credential=credential,
+                )
+            else:
+                self._service_client = BlobServiceClient.from_connection_string(
+                    self._settings.azure_blob_connection_string
+                )
+
             self._container_name = getattr(
                 self._settings,
                 "blob_storage_container_name",
                 PROTOCOLS_CONTAINER,
             )
-            self._container_client = self._service_client.get_container_client(
-                self._container_name
-            )
+            self._container_client = self._service_client.get_container_client(self._container_name)
 
             logger.info(
                 "BlobStorageClient initialized",
                 account=self._service_client.account_name,
                 container=self._container_name,
+                auth_mode=auth_mode,
             )
 
+        except AzureServiceError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to initialize BlobStorageClient",
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to initialize Blob Storage client: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to initialize Blob Storage client: {exc}") from exc
+
+    def _extract_account_name_from_connection_string(self, conn_str: str) -> str | None:
+        if not conn_str:
+            return None
+        for part in conn_str.split(";"):
+            if part.startswith("AccountName="):
+                return part.split("=", 1)[1]
+        return None
 
     async def upload_protocol(
         self,
@@ -116,9 +147,7 @@ class BlobStorageClient:
                 size_bytes=len(content),
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to upload protocol '{blob_name}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to upload protocol '{blob_name}': {exc}") from exc
 
     async def download_protocol(self, blob_name: str) -> bytes:
         """Download a treatment protocol document from blob storage.
@@ -151,9 +180,7 @@ class BlobStorageClient:
                 blob_name=blob_name,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to download protocol '{blob_name}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to download protocol '{blob_name}': {exc}") from exc
 
     async def list_protocols(self, prefix: str | None = None) -> list[dict]:
         """List all protocol blobs with their metadata.
@@ -184,9 +211,7 @@ class BlobStorageClient:
                         else "application/octet-stream"
                     ),
                     "last_modified": (
-                        blob_properties.last_modified.isoformat()
-                        if blob_properties.last_modified
-                        else None
+                        blob_properties.last_modified.isoformat() if blob_properties.last_modified else None
                     ),
                     "metadata": blob_properties.metadata or {},
                 }
@@ -206,9 +231,7 @@ class BlobStorageClient:
                 prefix=prefix,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to list protocols with prefix '{prefix}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to list protocols with prefix '{prefix}': {exc}") from exc
 
     async def delete_protocol(self, blob_name: str) -> None:
         """Delete a protocol document from blob storage.
@@ -234,9 +257,7 @@ class BlobStorageClient:
                 blob_name=blob_name,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to delete protocol '{blob_name}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to delete protocol '{blob_name}': {exc}") from exc
 
     @staticmethod
     def _infer_content_type(blob_name: str) -> str:

@@ -6,7 +6,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from azure.core.credentials import TokenCredential
 from azure.cosmos import CosmosClient, PartitionKey, exceptions as cosmos_exceptions
+from azure.identity import DefaultAzureCredential
 
 from cdss.core.config import Settings, get_settings
 from cdss.core.exceptions import AzureServiceError
@@ -38,9 +40,17 @@ class CosmosDBClient:
         self._settings = settings or get_settings()
 
         try:
+            credential: str | TokenCredential
+            auth_mode = "account_key"
+            if self._settings.cosmos_db_use_entra_id or not self._settings.cosmos_db_key:
+                credential = DefaultAzureCredential()
+                auth_mode = "entra_id"
+            else:
+                credential = self._settings.cosmos_db_key
+
             self._client = CosmosClient(
                 url=self._settings.cosmos_db_endpoint,
-                credential=self._settings.cosmos_db_key,
+                credential=credential,
             )
             self._database = self._client.get_database_client(
                 self._settings.cosmos_db_database_name
@@ -68,6 +78,7 @@ class CosmosDBClient:
                 "CosmosDBClient initialized",
                 endpoint=self._settings.cosmos_db_endpoint,
                 database=self._settings.cosmos_db_database_name,
+                auth_mode=auth_mode,
                 containers=list(self._containers.keys()),
             )
 
