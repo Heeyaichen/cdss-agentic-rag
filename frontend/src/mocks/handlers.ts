@@ -101,14 +101,22 @@ export const handlers = [
     const body = await request.json();
     const medications = (body as unknown as { medications?: { name: string; rxnorm_cui?: string; dose: string; frequency: string }[] }).medications ?? [];
     
-    const interactions = [];
+    const interactions: Array<{
+      drug_a: string;
+      drug_b: string;
+      severity: 'minor' | 'moderate' | 'major';
+      description: string;
+      evidence_level: number;
+      source: string;
+    }> = [];
+    const severityLevels = ['minor', 'moderate', 'major'] as const;
     for (let i = 0; i < medications.length; i++) {
       for (let j = i + 1; j < medications.length; j++) {
         if (Math.random() > 0.5) {
           interactions.push({
             drug_a: medications[i].name,
             drug_b: medications[j].name,
-            severity: ['minor', 'moderate', 'major'][Math.floor(Math.random() * 3)],
+            severity: severityLevels[Math.floor(Math.random() * severityLevels.length)],
             description: `Potential interaction between ${medications[i].name} and ${medications[j].name}. Monitor patient closely.`,
             evidence_level: Math.floor(Math.random() * 3) + 1,
             source: 'DrugBank 2024',

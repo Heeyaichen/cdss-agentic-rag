@@ -330,11 +330,17 @@ az login
 # Deploy to production environment
 ./infra/scripts/deploy.sh prod cdss-prod-rg
 
-# Populate Environment Files from Azure Resources
-./infra/scripts/populate-env.sh prod cdss-prod-rg
+# Optional: expose prod API publicly (for public Static Web App/browser access)
+./infra/scripts/deploy.sh prod cdss-prod-rg eastus2 true
 
-# Seed sample data
-./infra/scripts/seed-data.sh prod
+# Populate Environment Files from Azure Resources
+./infra/scripts/populate-env.sh cdss-prod-rg
+
+# Seed sample data from inside Azure network (recommended for prod)
+./infra/scripts/seed-data-infra-network.sh cdss-prod-rg
+
+# Local seeding (works best for dev/staging where public access is allowed)
+python infra/scripts/seed_data.py --environment dev
 ```
 
 ### 5. Run locally

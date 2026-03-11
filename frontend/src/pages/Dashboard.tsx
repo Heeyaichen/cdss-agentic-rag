@@ -69,7 +69,7 @@ export default function Dashboard() {
 
   const totalPatients = (patientData as any)?.total ?? 0;
   const systemStatus = (healthData as any)?.status ?? 'unknown';
-  const services = (healthData as any)?.services ?? {};
+  const services: Record<string, string> = ((healthData as any)?.services ?? {}) as Record<string, string>;
 
   const recentActivity = [
     { id: 1, type: 'query', description: 'Diabetes treatment options query', time: '2 hours ago', status: 'completed' },

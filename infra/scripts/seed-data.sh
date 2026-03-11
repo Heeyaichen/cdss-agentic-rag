@@ -24,7 +24,7 @@ COSMOS_ACCOUNT=$(echo $AZURE_COSMOS_ENDPOINT | sed 's|https://||' | sed 's|.docu
 # 1. Upload patient data to Cosmos DB
 echo "Uploading patient profile to Cosmos DB..."
 az cosmosdb sql container item upsert \
-    --account-name "COSMOS_ACCOUNT" \
+    --account-name "${COSMOS_ACCOUNT}" \
     --database-name cdss-db \
     --container-name patient-profiles \
     --partition-key-value "patient_12345" \

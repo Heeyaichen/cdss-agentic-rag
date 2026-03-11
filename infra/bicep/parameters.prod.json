@@ -8,11 +8,14 @@
     "environment": {
       "value": "prod"
     },
+    "prodPublicApi": {
+      "value": false
+    },
     "projectName": {
       "value": "cdss"
     },
     "containerImage": {
-      "value": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+      "value": "cdssacr.azurecr.io/cdss-api:latest"
     },
     "gpt4oDeploymentName": {
       "value": "gpt-4o"

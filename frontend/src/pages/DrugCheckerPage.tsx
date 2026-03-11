@@ -19,7 +19,7 @@ import {
   useTheme,
   alpha,
 } from '@mui/material';
-import { Search, Warning, Error as ErrorIcon, Info, Add, Delete } from '@mui/icons-material';
+import { Search, Warning, Error as ErrorIcon, Info, Add, Delete, CheckCircle } from '@mui/icons-material';
 import { useMutation } from '@tanstack/react-query';
 import { clinicalApi } from '@/lib/api-client';
 import { DrugInteraction } from '@/lib/types';
@@ -77,7 +77,7 @@ export default function DrugCheckerPage() {
       case 'minor':
         return <Info fontSize="small" />;
       default:
-        return null;
+        return undefined;
     }
   };
 

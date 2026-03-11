@@ -4,12 +4,13 @@
 # ============================================================================
 #
 # Usage:
-#   ./deploy.sh <environment> <resource-group> [location]
+#   ./deploy.sh <environment> <resource-group> [location] [prod-public-api]
 #
 # Examples:
 #   ./deploy.sh dev cdss-dev-rg eastus2
 #   ./deploy.sh staging cdss-staging-rg eastus2
 #   ./deploy.sh prod cdss-prod-rg eastus2
+#   ./deploy.sh prod cdss-prod-rg eastus2 true
 #
 # Prerequisites:
 #   - Azure CLI installed and logged in (az login)
@@ -47,18 +48,24 @@ log_error() {
 ENVIRONMENT="${1:-}"
 RESOURCE_GROUP="${2:-}"
 LOCATION="${3:-eastus2}"
+PROD_PUBLIC_API_OVERRIDE="${4:-${PROD_PUBLIC_API:-}}"
 
 if [[ -z "$ENVIRONMENT" || -z "$RESOURCE_GROUP" ]]; then
-    echo "Usage: $0 <environment> <resource-group> [location]"
+    echo "Usage: $0 <environment> <resource-group> [location] [prod-public-api]"
     echo ""
     echo "Arguments:"
     echo "  environment     Target environment: dev, staging, or prod"
     echo "  resource-group  Azure resource group name"
     echo "  location        Azure region (default: eastus2)"
+    echo "  prod-public-api Optional true/false override for prod API exposure"
     echo ""
     echo "Examples:"
     echo "  $0 dev cdss-dev-rg"
     echo "  $0 prod cdss-prod-rg westus2"
+    echo "  $0 prod cdss-prod-rg eastus2 true"
+    echo ""
+    echo "Environment variable alternative:"
+    echo "  PROD_PUBLIC_API=true $0 prod cdss-prod-rg"
     exit 1
 fi
 
@@ -66,6 +73,15 @@ fi
 if [[ "$ENVIRONMENT" != "dev" && "$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "prod" ]]; then
     log_error "Invalid environment: $ENVIRONMENT. Must be one of: dev, staging, prod"
     exit 1
+fi
+
+if [[ -n "$PROD_PUBLIC_API_OVERRIDE" && "$PROD_PUBLIC_API_OVERRIDE" != "true" && "$PROD_PUBLIC_API_OVERRIDE" != "false" ]]; then
+    log_error "Invalid prod-public-api value: $PROD_PUBLIC_API_OVERRIDE. Must be true or false."
+    exit 1
+fi
+
+if [[ "$ENVIRONMENT" != "prod" && -n "$PROD_PUBLIC_API_OVERRIDE" ]]; then
+    log_warn "Ignoring prod-public-api override for non-prod environment: ${ENVIRONMENT}"
 fi
 
 # --- Configuration ---
@@ -123,6 +139,13 @@ if [[ "$ENVIRONMENT" == "prod" ]]; then
     log_warn "Resource Group: ${RESOURCE_GROUP}"
     log_warn "Location:       ${LOCATION}"
     log_warn "Subscription:   ${SUBSCRIPTION_NAME}"
+    if [[ -n "$PROD_PUBLIC_API_OVERRIDE" ]]; then
+        if [[ "$PROD_PUBLIC_API_OVERRIDE" == "true" ]]; then
+            log_warn "API Exposure:   PUBLIC (override)"
+        else
+            log_warn "API Exposure:   PRIVATE (override)"
+        fi
+    fi
     echo ""
     read -p "Are you sure you want to deploy to PRODUCTION? (yes/no): " CONFIRM
     if [[ "$CONFIRM" != "yes" ]]; then
@@ -157,6 +180,10 @@ refresh_extra_bicep_params() {
 
     if [[ "$DOCINTEL_RESTORE_ENABLED" == "true" ]]; then
         EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} docIntelRestore=true"
+    fi
+
+    if [[ "$ENVIRONMENT" == "prod" && -n "$PROD_PUBLIC_API_OVERRIDE" ]]; then
+        EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} prodPublicApi=${PROD_PUBLIC_API_OVERRIDE}"
     fi
 
     EXTRA_BICEP_PARAMS="$(echo "$EXTRA_BICEP_PARAMS" | xargs)"
@@ -233,6 +260,9 @@ done
 
 if [[ $VALIDATE_STATUS -eq 0 ]]; then
     log_success "Template validation passed."
+elif [[ "$VALIDATE_OUTPUT" == *"715-123420"* ]]; then
+    log_warn "Azure template validation returned internal error 715-123420."
+    log_warn "Proceeding with deployment anyway (resources may already exist)."
 else
     echo "$VALIDATE_OUTPUT"
     log_error "Template validation failed. Fix the errors above and retry."

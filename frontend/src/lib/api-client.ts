@@ -36,8 +36,9 @@ class ApiClient {
     this.client.interceptors.response.use(
       (response) => response,
       (error: AxiosError) => {
+        const responseData = error.response?.data as { message?: string } | undefined;
         const apiError: ApiError = {
-          message: error.response?.data?.message || error.message,
+          message: responseData?.message || error.message,
           status_code: error.response?.status,
           details: error.response?.data,
         };
@@ -46,22 +47,22 @@ class ApiClient {
     );
   }
 
-  async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
+  async get<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const response = await this.client.get<T>(url, config);
     return response.data;
   }
 
-  async post<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+  async post<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
     const response = await this.client.post<T>(url, data, config);
     return response.data;
   }
 
-  async put<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+  async put<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
     const response = await this.client.put<T>(url, data, config);
     return response.data;
   }
 
-  async delete<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
+  async delete<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const response = await this.client.delete<T>(url, config);
     return response.data;
   }
@@ -140,11 +141,11 @@ export const clinicalApi = {
 
 export function createStreamingConnection(
   query: string,
-  patientId?: string,
-  sessionId?: string,
   onMessage: (data: unknown) => void,
   onError: (error: Error) => void,
-  onComplete: () => void
+  onComplete: () => void,
+  patientId?: string,
+  sessionId?: string
 ): () => void {
   const params = new URLSearchParams({
     query,

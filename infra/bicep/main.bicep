@@ -16,6 +16,9 @@ param location string = resourceGroup().location
 ])
 param environment string = 'dev'
 
+@description('Expose production API publicly. false keeps the Container Apps environment internal-only.')
+param prodPublicApi bool = false
+
 @description('Project name prefix for resource naming')
 param projectName string = 'cdss'
 
@@ -76,6 +79,8 @@ var aiSubnetName = 'ai-subnet'
 var aiSubnetPrefix = '10.0.3.0/24'
 var integrationSubnetName = 'integration-subnet'
 var integrationSubnetPrefix = '10.0.4.0/24'
+var containerAppEnvironmentInternal = environment == 'prod' && !prodPublicApi
+var apiExposureMode = environment == 'prod' ? (prodPublicApi ? 'public' : 'private') : 'public'
 
 // Resource names
 var managedIdentityName = '${resourcePrefix}-identity'
@@ -261,6 +266,14 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           networkSecurityGroup: {
             id: appNsg.id
           }
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+            {
+              service: 'Microsoft.KeyVault'
+            }
+          ]
           delegations: [
             {
               name: 'Microsoft.App.environments'
@@ -278,6 +291,14 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           networkSecurityGroup: {
             id: dataNsg.id
           }
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+            {
+              service: 'Microsoft.KeyVault'
+            }
+          ]
           privateEndpointNetworkPolicies: 'Disabled'
         }
       }
@@ -288,6 +309,14 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           networkSecurityGroup: {
             id: aiNsg.id
           }
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+            {
+              service: 'Microsoft.KeyVault'
+            }
+          ]
           privateEndpointNetworkPolicies: 'Disabled'
         }
       }
@@ -298,6 +327,14 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           networkSecurityGroup: {
             id: integrationNsg.id
           }
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+            {
+              service: 'Microsoft.KeyVault'
+            }
+          ]
           privateEndpointNetworkPolicies: 'Disabled'
         }
       }
@@ -334,6 +371,24 @@ resource searchPrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
 resource searchPrivateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
   parent: searchPrivateDnsZone
   name: '${vnetName}-search-link'
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: vnet.id
+    }
+    registrationEnabled: false
+  }
+}
+
+resource keyVaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.vaultcore.azure.net'
+  location: 'global'
+  tags: tags
+}
+
+resource keyVaultPrivateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: keyVaultPrivateDnsZone
+  name: '${vnetName}-keyvault-link'
   location: 'global'
   properties: {
     virtualNetwork: {
@@ -538,7 +593,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
       {
         locationName: location
         failoverPriority: 0
-        isZoneRedundant: environment == 'prod'
+        isZoneRedundant: false // Disabled due to capacity constraints in East US 2
       }
     ]
     capabilities: [
@@ -1054,13 +1109,12 @@ resource storageBlobContributorRole 'Microsoft.Authorization/roleAssignments@202
 }
 
 // Cosmos DB Built-in Data Contributor for Managed Identity
-resource cosmosDataContributorRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+resource cosmosDataContributorRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2023-11-15' = {
   parent: cosmosAccount
   name: guid(cosmosAccount.id, managedIdentity.id, '00000000-0000-0000-0000-000000000002')
   properties: {
     roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002' // Cosmos DB Built-in Data Contributor
     principalId: managedIdentity.properties.principalId
-    scope: cosmosAccount.id
   }
 }
 
@@ -1101,6 +1155,45 @@ resource cosmosPrivateEndpointDnsGroup 'Microsoft.Network/privateEndpoints/priva
         name: 'cosmos-dns-config'
         properties: {
           privateDnsZoneId: cosmosPrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
+// --- Key Vault Private Endpoint ---
+
+resource keyVaultPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (environment == 'prod') {
+  name: '${keyVaultName}-pe'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: '${vnet.id}/subnets/${dataSubnetName}'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: '${keyVaultName}-plsc'
+        properties: {
+          privateLinkServiceId: keyVault.id
+          groupIds: [
+            'vault'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource keyVaultPrivateEndpointDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (environment == 'prod') {
+  parent: keyVaultPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'keyvault-dns-config'
+        properties: {
+          privateDnsZoneId: keyVaultPrivateDnsZone.id
         }
       }
     ]
@@ -1165,7 +1258,7 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
     daprAIInstrumentationKey: appInsights.properties.InstrumentationKey
     vnetConfiguration: {
       infrastructureSubnetId: '${vnet.id}/subnets/${appSubnetName}'
-      internal: environment == 'prod'
+      internal: containerAppEnvironmentInternal
     }
     zoneRedundant: environment == 'prod'
     workloadProfiles: [
@@ -1176,6 +1269,146 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
     ]
   }
 }
+
+var storageBlobEndpoint = 'https://${storageAccount.name}.blob.core.windows.net/'
+
+var containerAppBaseSecrets = [
+  {
+    name: 'cosmos-connection-string'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/cosmos-connection-string'
+    identity: managedIdentity.id
+  }
+  {
+    name: 'search-api-key'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/search-api-key'
+    identity: managedIdentity.id
+  }
+  {
+    name: 'openai-api-key'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/openai-api-key'
+    identity: managedIdentity.id
+  }
+  {
+    name: 'doc-intelligence-key'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/doc-intelligence-key'
+    identity: managedIdentity.id
+  }
+  {
+    name: 'redis-connection-string'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/redis-connection-string'
+    identity: managedIdentity.id
+  }
+]
+
+var containerAppSecrets = environment == 'prod'
+  ? containerAppBaseSecrets
+  : concat(containerAppBaseSecrets, [
+      {
+        name: 'storage-connection-string'
+        keyVaultUrl: '${keyVault.properties.vaultUri}secrets/storage-connection-string'
+        identity: managedIdentity.id
+      }
+    ])
+
+var containerAppBaseEnv = [
+  {
+    name: 'ENVIRONMENT'
+    value: environment
+  }
+  {
+    name: 'AZURE_OPENAI_ENDPOINT'
+    value: openai.properties.endpoint
+  }
+  {
+    name: 'AZURE_OPENAI_API_KEY'
+    secretRef: 'openai-api-key'
+  }
+  {
+    name: 'AZURE_OPENAI_GPT4O_DEPLOYMENT'
+    value: gpt4oDeploymentName
+  }
+  {
+    name: 'AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT'
+    value: gpt4oMiniDeploymentName
+  }
+  {
+    name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
+    value: embeddingDeploymentName
+  }
+  {
+    name: 'AZURE_SEARCH_ENDPOINT'
+    value: 'https://${aiSearch.name}.search.windows.net'
+  }
+  {
+    name: 'AZURE_SEARCH_API_KEY'
+    secretRef: 'search-api-key'
+  }
+  {
+    name: 'AZURE_COSMOS_ENDPOINT'
+    value: cosmosAccount.properties.documentEndpoint
+  }
+  {
+    name: 'AZURE_COSMOS_CONNECTION_STRING'
+    secretRef: 'cosmos-connection-string'
+  }
+  {
+    name: 'AZURE_COSMOS_DATABASE'
+    value: cosmosDatabaseName
+  }
+  {
+    name: 'AZURE_DOC_INTELLIGENCE_ENDPOINT'
+    value: documentIntelligence.properties.endpoint
+  }
+  {
+    name: 'AZURE_DOC_INTELLIGENCE_KEY'
+    secretRef: 'doc-intelligence-key'
+  }
+  {
+    name: 'AZURE_STORAGE_ENDPOINT'
+    value: storageBlobEndpoint
+  }
+  {
+    name: 'AZURE_STORAGE_USE_ENTRA_ID'
+    value: environment == 'prod' ? 'true' : 'false'
+  }
+  {
+    name: 'CDSS_AZURE_BLOB_ENDPOINT'
+    value: storageBlobEndpoint
+  }
+  {
+    name: 'CDSS_AZURE_BLOB_USE_ENTRA_ID'
+    value: environment == 'prod' ? 'true' : 'false'
+  }
+  {
+    name: 'REDIS_CONNECTION_STRING'
+    secretRef: 'redis-connection-string'
+  }
+  {
+    name: 'AZURE_KEY_VAULT_URI'
+    value: keyVault.properties.vaultUri
+  }
+  {
+    name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+    value: appInsights.properties.ConnectionString
+  }
+  {
+    name: 'AZURE_CLIENT_ID'
+    value: managedIdentity.properties.clientId
+  }
+]
+
+var containerAppEnvVars = environment == 'prod'
+  ? containerAppBaseEnv
+  : concat(containerAppBaseEnv, [
+      {
+        name: 'AZURE_STORAGE_CONNECTION_STRING'
+        secretRef: 'storage-connection-string'
+      }
+      {
+        name: 'CDSS_AZURE_BLOB_CONNECTION_STRING'
+        secretRef: 'storage-connection-string'
+      }
+    ])
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName
@@ -1220,38 +1453,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         ]
       }
       maxInactiveRevisions: 3
-      secrets: [
-        {
-          name: 'cosmos-connection-string'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/cosmos-connection-string'
-          identity: managedIdentity.id
-        }
-        {
-          name: 'search-api-key'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/search-api-key'
-          identity: managedIdentity.id
-        }
-        {
-          name: 'openai-api-key'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/openai-api-key'
-          identity: managedIdentity.id
-        }
-        {
-          name: 'doc-intelligence-key'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/doc-intelligence-key'
-          identity: managedIdentity.id
-        }
-        {
-          name: 'redis-connection-string'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/redis-connection-string'
-          identity: managedIdentity.id
-        }
-        {
-          name: 'storage-connection-string'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/storage-connection-string'
-          identity: managedIdentity.id
-        }
-      ]
+      secrets: containerAppSecrets
     }
     template: {
       containers: [
@@ -1262,85 +1464,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(environment == 'prod' ? '2.0' : '0.5')
             memory: environment == 'prod' ? '4Gi' : '1Gi'
           }
-          env: [
-            {
-              name: 'ENVIRONMENT'
-              value: environment
-            }
-            {
-              name: 'AZURE_OPENAI_ENDPOINT'
-              value: openai.properties.endpoint
-            }
-            {
-              name: 'AZURE_OPENAI_API_KEY'
-              secretRef: 'openai-api-key'
-            }
-            {
-              name: 'AZURE_OPENAI_GPT4O_DEPLOYMENT'
-              value: gpt4oDeploymentName
-            }
-            {
-              name: 'AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT'
-              value: gpt4oMiniDeploymentName
-            }
-            {
-              name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
-              value: embeddingDeploymentName
-            }
-            {
-              name: 'AZURE_SEARCH_ENDPOINT'
-              value: 'https://${aiSearch.name}.search.windows.net'
-            }
-            {
-              name: 'AZURE_SEARCH_API_KEY'
-              secretRef: 'search-api-key'
-            }
-            {
-              name: 'AZURE_COSMOS_ENDPOINT'
-              value: cosmosAccount.properties.documentEndpoint
-            }
-            {
-              name: 'AZURE_COSMOS_CONNECTION_STRING'
-              secretRef: 'cosmos-connection-string'
-            }
-            {
-              name: 'AZURE_COSMOS_DATABASE'
-              value: cosmosDatabaseName
-            }
-            {
-              name: 'AZURE_DOC_INTELLIGENCE_ENDPOINT'
-              value: documentIntelligence.properties.endpoint
-            }
-            {
-              name: 'AZURE_DOC_INTELLIGENCE_KEY'
-              secretRef: 'doc-intelligence-key'
-            }
-            {
-              name: 'AZURE_STORAGE_CONNECTION_STRING'
-              secretRef: 'storage-connection-string'
-            }
-            {
-              name: 'REDIS_CONNECTION_STRING'
-              secretRef: 'redis-connection-string'
-            }
-            {
-              name: 'AZURE_KEY_VAULT_URI'
-              value: keyVault.properties.vaultUri
-            }
-            {
-              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-              value: appInsights.properties.ConnectionString
-            }
-            {
-              name: 'AZURE_CLIENT_ID'
-              value: managedIdentity.properties.clientId
-            }
-          ]
+          env: containerAppEnvVars
           probes: [
             {
               type: 'Liveness'
               httpGet: {
-                path: '/health'
+                path: '/api/v1/health'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -1352,7 +1481,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Readiness'
               httpGet: {
-                path: '/health/ready'
+                path: '/api/v1/health'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -1364,7 +1493,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Startup'
               httpGet: {
-                path: '/health'
+                path: '/api/v1/health'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -1392,13 +1521,24 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
+  dependsOn: [
+    kvSecretsUserRole
+    cosmosConnectionStringSecret
+    searchApiKeySecret
+    openaiApiKeySecret
+    docIntelligenceKeySecret
+    redisConnectionStringSecret
+    storageConnectionStringSecret
+  ]
 }
 
 // ============================================================================
 // FRONTEND - Azure Static Web Apps
+// Note: Static Web Apps requires a repository URL. For manual deployment,
+// create via Azure Portal or CLI after infrastructure is provisioned.
 // ============================================================================
 
-resource staticWebApp 'Microsoft.Web/staticSites@2023-01-01' = {
+resource staticWebApp 'Microsoft.Web/staticSites@2023-01-01' = if (environment != 'prod') {
   name: '${resourcePrefix}-frontend'
   location: location
   tags: tags
@@ -1407,25 +1547,24 @@ resource staticWebApp 'Microsoft.Web/staticSites@2023-01-01' = {
     tier: 'Free'
   }
   properties: {
-    repositoryUrl: '' // Leave empty for manual deployment
+    repositoryUrl: 'https://github.com/placeholder/cdss-frontend'
     branch: 'main'
     buildProperties: {
       appLocation: 'frontend'
       apiLocation: ''
       outputLocation: 'dist'
     }
-    provider: 'None' // Manual deployment via CLI
+    provider: 'Custom'
   }
 }
 
-// Configure Static Web App environment variables
-resource staticWebAppConfig 'Microsoft.Web/staticSites/config@2023-01-01' = {
+resource staticWebAppConfig 'Microsoft.Web/staticSites/config@2023-01-01' = if (environment != 'prod') {
   parent: staticWebApp
   name: 'appsettings'
   properties: {
     VITE_USE_MOCK_API: 'false'
     VITE_API_BASE_URL: containerApp.properties.configuration.ingress.fqdn
-    VITE_AZURE_CLIENT_ID: '' // Add after Azure AD app registration
+    VITE_AZURE_CLIENT_ID: ''
     VITE_AZURE_TENANT_ID: subscription().tenantId
   }
 }
@@ -1438,7 +1577,7 @@ resource staticWebAppConfig 'Microsoft.Web/staticSites/config@2023-01-01' = {
 // resource uses the search management API to create the indexes.
 // In practice, you would use a deployment script or post-deployment step.
 
-resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
+resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = if (environment != 'prod') {
   name: '${resourcePrefix}-create-search-indexes'
   location: location
   tags: tags
@@ -1468,24 +1607,22 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
       #!/bin/bash
       set -e
 
-      # Function to create or update an index
+      echo "Creating search indexes using az rest..."
+
       create_index() {
         local index_json="$1"
         local index_name=$(echo "$index_json" | python3 -c "import sys,json;print(json.load(sys.stdin)['name'])")
         echo "Creating/updating index: $index_name"
 
-        curl -s -X PUT \
-          "${SEARCH_ENDPOINT}/indexes/${index_name}?api-version=2024-05-01-preview" \
-          -H "Content-Type: application/json" \
-          -H "api-key: ${SEARCH_ADMIN_KEY}" \
-          -d "$index_json"
+        az rest --method put \
+          --url "${SEARCH_ENDPOINT}/indexes/${index_name}?api-version=2024-05-01-preview" \
+          --headers "Content-Type=application/json api-key=${SEARCH_ADMIN_KEY}" \
+          --body "$index_json"
 
-        echo ""
         echo "Index $index_name created/updated successfully"
       }
 
-      # === Index 1: patient-records ===
-      create_index '{
+      PATIENT_RECORDS_INDEX='{
         "name": "patient-records",
         "fields": [
           {"name": "id", "type": "Edm.String", "key": true, "filterable": true},
@@ -1522,8 +1659,7 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
         }
       }'
 
-      # === Index 2: treatment-protocols ===
-      create_index '{
+      TREATMENT_PROTOCOLS_INDEX='{
         "name": "treatment-protocols",
         "fields": [
           {"name": "id", "type": "Edm.String", "key": true, "filterable": true},
@@ -1563,8 +1699,7 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
         }
       }'
 
-      # === Index 3: medical-literature-cache ===
-      create_index '{
+      MEDICAL_LITERATURE_INDEX='{
         "name": "medical-literature-cache",
         "fields": [
           {"name": "id", "type": "Edm.String", "key": true, "filterable": true},
@@ -1605,12 +1740,17 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
         }
       }'
 
+      create_index "$PATIENT_RECORDS_INDEX"
+      create_index "$TREATMENT_PROTOCOLS_INDEX"
+      create_index "$MEDICAL_LITERATURE_INDEX"
+
       echo "All search indexes created successfully"
     '''
   }
   dependsOn: [
     aiSearch
     searchDataContributorRole
+    managedIdentity
   ]
 }
 
@@ -1712,11 +1852,17 @@ output containerAppUrl string = 'https://${containerApp.properties.configuration
 @description('Backend API FQDN')
 output backendUrl string = containerApp.properties.configuration.ingress.fqdn
 
+@description('Backend API exposure mode')
+output backendApiExposureMode string = apiExposureMode
+
+@description('Container Apps environment internal networking mode')
+output containerAppEnvironmentIsInternal bool = containerAppEnvironmentInternal
+
 @description('Static Web App URL (Frontend)')
-output staticWebAppUrl string = 'https://${staticWebApp.properties.defaultHostname}'
+output staticWebAppUrl string = environment != 'prod' ? 'https://${staticWebApp.properties.defaultHostname}' : ''
 
 @description('Static Web App name')
-output staticWebAppName string = staticWebApp.name
+output staticWebAppName string = environment != 'prod' ? staticWebApp.name : ''
 
 @description('Application Insights instrumentation key')
 output appInsightsKey string = appInsights.properties.InstrumentationKey

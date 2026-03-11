@@ -35,8 +35,6 @@ export function useStreamingQuery(
 
     cancelRef.current = createStreamingConnection(
       query,
-      patientId,
-      sessionId,
       (data) => {
         const update = data as StreamingQueryUpdate;
         
@@ -71,7 +69,9 @@ export function useStreamingQuery(
       },
       () => {
         setIsStreaming(false);
-      }
+      },
+      patientId,
+      sessionId
     );
   }, [query, patientId, sessionId]);
 
