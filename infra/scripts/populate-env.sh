@@ -4,39 +4,178 @@
 set -euo pipefail
 
 RG="${1:-cdss-prod-rg}"
+ENVIRONMENT="${2:-}"
+
+if [[ -z "$ENVIRONMENT" ]]; then
+    if [[ "$RG" == *"prod"* ]]; then
+        ENVIRONMENT="prod"
+    elif [[ "$RG" == *"staging"* ]]; then
+        ENVIRONMENT="staging"
+    else
+        ENVIRONMENT="dev"
+    fi
+fi
 
 echo "Fetching Azure resource details from: $RG"
 
+warn() {
+    echo "[WARN] $1"
+}
+
+run_az_tsv() {
+    local __result_var="$1"
+    local __description="$2"
+    shift 2
+
+    local __output=""
+    local __error=""
+    if ! __output="$("$@" -o tsv 2>/tmp/cdss_populate_env_error.log)"; then
+        __error="$(cat /tmp/cdss_populate_env_error.log 2>/dev/null || true)"
+        if [[ -n "$__error" ]]; then
+            warn "${__description} failed; leaving value empty. Details: ${__error}"
+        else
+            warn "${__description} failed; leaving value empty."
+        fi
+        __output=""
+    fi
+
+    printf -v "$__result_var" "%s" "$__output"
+}
+
 # Get resource names
-COSMOS=$(az cosmosdb list --resource-group "$RG" --query "[0].name" -o tsv)
-SEARCH=$(az search service list --resource-group "$RG" --query "[0].name" -o tsv)
-OPENAI=$(az cognitiveservices account list --resource-group "$RG" --query "[?kind=='OpenAI'].name" -o tsv | head -1)
-DOCINTEL=$(az cognitiveservices account list --resource-group "$RG" --query "[?kind=='FormRecognizer'].name" -o tsv | head -1)
-STORAGE=$(az storage account list --resource-group "$RG" --query "[?tags.project=='cdss-agentic-rag'].name" -o tsv | head -1)
+run_az_tsv COSMOS "Failed to find Cosmos DB account" az cosmosdb list --resource-group "$RG" --query "[0].name"
+run_az_tsv SEARCH "Failed to find Azure AI Search service" az search service list --resource-group "$RG" --query "[0].name"
+run_az_tsv OPENAI "Failed to find Azure OpenAI account" az cognitiveservices account list --resource-group "$RG" --query "[?kind=='OpenAI'].name | [0]"
+run_az_tsv DOCINTEL "Failed to find Document Intelligence account" az cognitiveservices account list --resource-group "$RG" --query "[?kind=='FormRecognizer'].name | [0]"
+run_az_tsv KEYVAULT "Failed to find Key Vault" az keyvault list --resource-group "$RG" --query "[0].name"
+
+# Get storage account - filter out deployment scripts storage (contains 'scripts' in name)
+run_az_tsv STORAGE "Failed to find Storage account" az storage account list --resource-group "$RG" --query "[?tags.project=='cdss-agentic-rag' && !contains(name, 'scripts')].name | [0]"
+
+# Fallback: resolve Cosmos via generic resource list
+if [[ -z "${COSMOS}" ]]; then
+    run_az_tsv COSMOS "Failed to find Cosmos DB account fallback" az resource list --resource-group "$RG" --resource-type "Microsoft.DocumentDB/databaseAccounts" --query "[0].name"
+fi
+
+# Fallback: if no storage found with tag, try without tag filter but exclude scripts
+if [[ -z "${STORAGE}" ]]; then
+    run_az_tsv STORAGE "Failed to find Storage account fallback" az storage account list --resource-group "$RG" --query "[?(!contains(name, 'scripts') && !contains(name, 'zsa'))].name | [0]"
+fi
+
+# Fallback: resolve Storage via generic resource list
+if [[ -z "${STORAGE}" ]]; then
+    run_az_tsv STORAGE "Failed to find Storage account generic fallback" az resource list --resource-group "$RG" --resource-type "Microsoft.Storage/storageAccounts" --query "[?(!contains(name, 'scripts') && !contains(name, 'zsa'))].name | [0]"
+fi
 
 # Get endpoints
-COSMOS_EP=$(az cosmosdb show --name "$COSMOS" --resource-group "$RG" --query documentEndpoint -o tsv)
-SEARCH_EP="https://$SEARCH.search.windows.net"
-OPENAI_EP=$(az cognitiveservices account show --name "$OPENAI" --resource-group "$RG" --query properties.endpoint -o tsv)
-DOCINTEL_EP=$(az cognitiveservices account show --name "$DOCINTEL" --resource-group "$RG" --query properties.endpoint -o tsv)
+run_az_tsv COSMOS_EP "Failed to fetch Cosmos endpoint" az cosmosdb show --name "$COSMOS" --resource-group "$RG" --query documentEndpoint
 
-# Get keys
-COSMOS_KEY=$(az cosmosdb keys list --name "$COSMOS" --resource-group "$RG" --query primaryMasterKey -o tsv)
-SEARCH_KEY=$(az search admin-key show --service-name "$SEARCH" --resource-group "$RG" --query primaryKey -o tsv)
-OPENAI_KEY=$(az cognitiveservices account keys list --name "$OPENAI" --resource-group "$RG" --query key1 -o tsv)
-DOCINTEL_KEY=$(az cognitiveservices account keys list --name "$DOCINTEL" --resource-group "$RG" --query key1 -o tsv)
-STORAGE_CONN=$(az storage account show-connection-string --name "$STORAGE" --resource-group "$RG" --query connectionString -o tsv)
+# Fallback: construct Cosmos endpoint from account name if direct fetch failed
+if [[ -z "${COSMOS_EP}" && -n "${COSMOS}" ]]; then
+    COSMOS_EP="https://${COSMOS}.documents.azure.com:443/"
+    echo "[INFO] Constructed Cosmos endpoint from account name: ${COSMOS_EP}"
+fi
+
+SEARCH_EP="https://${SEARCH}.search.windows.net"
+run_az_tsv OPENAI_EP "Failed to fetch OpenAI endpoint" az cognitiveservices account show --name "$OPENAI" --resource-group "$RG" --query properties.endpoint
+run_az_tsv DOCINTEL_EP "Failed to fetch Document Intelligence endpoint" az cognitiveservices account show --name "$DOCINTEL" --resource-group "$RG" --query properties.endpoint
+
+# Get keys - these may fail in network-isolated prod environments
+run_az_tsv COSMOS_KEY "Failed to fetch Cosmos key" az cosmosdb keys list --name "$COSMOS" --resource-group "$RG" --query primaryMasterKey
+run_az_tsv SEARCH_KEY "Failed to fetch Search admin key" az search admin-key show --service-name "$SEARCH" --resource-group "$RG" --query primaryKey
+run_az_tsv OPENAI_KEY "Failed to fetch OpenAI key" az cognitiveservices account keys list --name "$OPENAI" --resource-group "$RG" --query key1
+run_az_tsv DOCINTEL_KEY "Failed to fetch Document Intelligence key" az cognitiveservices account keys list --name "$DOCINTEL" --resource-group "$RG" --query key1
+
+# Storage connection string - for Entra ID auth, we can leave this empty
+run_az_tsv STORAGE_CONN "Failed to fetch Storage connection string" az storage account show-connection-string --name "$STORAGE" --resource-group "$RG" --query connectionString
+
+# Get storage account endpoint for Entra ID auth
+run_az_tsv STORAGE_EP "Failed to fetch Storage endpoint" az storage account show --name "$STORAGE" --resource-group "$RG" --query primaryEndpoints.blob
+
+# Fallback: construct Storage blob endpoint from account name if direct fetch failed
+if [[ -z "${STORAGE_EP}" && -n "${STORAGE}" ]]; then
+    STORAGE_EP="https://${STORAGE}.blob.core.windows.net/"
+    echo "[INFO] Constructed Storage endpoint from account name: ${STORAGE_EP}"
+fi
+
+# Cosmos key fallback: derive AccountKey from connection string when direct key lookup fails.
+if [[ -z "${COSMOS_KEY}" ]]; then
+    run_az_tsv COSMOS_CONN "Failed to fetch Cosmos connection string fallback" az cosmosdb keys list --name "$COSMOS" --resource-group "$RG" --type connection-strings --query "connectionStrings[0].connectionString"
+    if [[ -n "${COSMOS_CONN}" ]]; then
+        COSMOS_KEY="$(echo "$COSMOS_CONN" | sed -n 's/.*AccountKey=\([^;]*\).*/\1/p')"
+        if [[ -n "${COSMOS_KEY}" ]]; then
+            echo "[INFO] Derived Cosmos key from connection string fallback."
+        fi
+    fi
+fi
+
+# Final fallback: fetch Cosmos connection string from Key Vault secret generated by Bicep deployment.
+if [[ -z "${COSMOS_KEY}" && -n "${KEYVAULT}" ]]; then
+    run_az_tsv KV_COSMOS_CONN "Failed to fetch Key Vault cosmos-connection-string secret fallback" az keyvault secret show --vault-name "$KEYVAULT" --name "cosmos-connection-string" --query value
+    if [[ -z "${KV_COSMOS_CONN}" ]]; then
+        run_az_tsv CURRENT_USER_OID "Failed to detect signed-in user object ID for Key Vault role assignment" az ad signed-in-user show --query id
+        run_az_tsv KEYVAULT_ID "Failed to resolve Key Vault resource ID for role assignment" az keyvault show --name "$KEYVAULT" --resource-group "$RG" --query id
+
+        if [[ -n "${CURRENT_USER_OID}" && -n "${KEYVAULT_ID}" ]]; then
+            echo "[INFO] Attempting to grant Key Vault Secrets User role to current user for ${KEYVAULT}..."
+            if az role assignment create \
+                --assignee-object-id "$CURRENT_USER_OID" \
+                --assignee-principal-type User \
+                --role "Key Vault Secrets User" \
+                --scope "$KEYVAULT_ID" \
+                --only-show-errors \
+                --output none 2>/tmp/cdss_populate_env_error.log; then
+                echo "[INFO] Role assignment completed. Waiting for RBAC propagation..."
+            else
+                warn "Automatic Key Vault role assignment failed. Details: $(cat /tmp/cdss_populate_env_error.log 2>/dev/null || true)"
+            fi
+
+            for _ in 1 2 3 4 5 6; do
+                run_az_tsv KV_COSMOS_CONN "Failed to fetch Key Vault cosmos-connection-string secret after role assignment" az keyvault secret show --vault-name "$KEYVAULT" --name "cosmos-connection-string" --query value
+                if [[ -n "${KV_COSMOS_CONN}" ]]; then
+                    break
+                fi
+                echo "[INFO] Waiting 10s for role propagation before retrying Key Vault secret read..."
+                sleep 10
+            done
+        fi
+    fi
+
+    if [[ -n "${KV_COSMOS_CONN}" ]]; then
+        COSMOS_KEY="$(echo "$KV_COSMOS_CONN" | sed -n 's/.*AccountKey=\([^;]*\).*/\1/p')"
+        if [[ -n "${COSMOS_KEY}" ]]; then
+            echo "[INFO] Derived Cosmos key from Key Vault secret fallback."
+        fi
+    fi
+fi
+
+COSMOS_USE_ENTRA_ID="false"
+if [[ -z "${COSMOS_KEY}" ]]; then
+    COSMOS_USE_ENTRA_ID="true"
+    warn "Cosmos key is unavailable. .env will enable Entra ID auth for Cosmos."
+fi
+
+STORAGE_USE_ENTRA_ID="false"
+if [[ -z "${STORAGE_CONN}" ]]; then
+    STORAGE_USE_ENTRA_ID="true"
+    warn "Storage connection string is unavailable. .env will enable Entra ID auth for Storage."
+fi
 
 # Create .env.azure (for seed-data.sh)
 cat > .env.azure << EOF
-ENVIRONMENT=dev
+ENVIRONMENT=$ENVIRONMENT
 AZURE_COSMOS_ENDPOINT=$COSMOS_EP
 AZURE_COSMOS_DATABASE=cdss-db
+AZURE_COSMOS_KEY=$COSMOS_KEY
+AZURE_COSMOS_USE_ENTRA_ID=$COSMOS_USE_ENTRA_ID
 AZURE_SEARCH_ENDPOINT=$SEARCH_EP
 AZURE_OPENAI_ENDPOINT=$OPENAI_EP
 AZURE_OPENAI_GPT4O_DEPLOYMENT=gpt-4o
 AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT=gpt-4o-mini
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+AZURE_STORAGE_ENDPOINT=$STORAGE_EP
+AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN
+AZURE_STORAGE_USE_ENTRA_ID=$STORAGE_USE_ENTRA_ID
 EOF
 
 # Create .env (for Python app)
@@ -63,6 +202,7 @@ CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX=medical-literature
 # ── Azure Cosmos DB ───────────────────────────────────────────────────────────
 CDSS_AZURE_COSMOS_ENDPOINT=$COSMOS_EP
 CDSS_AZURE_COSMOS_KEY=$COSMOS_KEY
+CDSS_AZURE_COSMOS_USE_ENTRA_ID=$COSMOS_USE_ENTRA_ID
 CDSS_AZURE_COSMOS_DATABASE_NAME=cdss-db
 CDSS_AZURE_COSMOS_PATIENT_PROFILES_CONTAINER=patient-profiles
 CDSS_AZURE_COSMOS_CONVERSATION_HISTORY_CONTAINER=conversation-history
@@ -76,6 +216,8 @@ CDSS_AZURE_DOCUMENT_INTELLIGENCE_KEY=$DOCINTEL_KEY
 
 # ── Azure Blob Storage ───────────────────────────────────────────────────────
 CDSS_AZURE_BLOB_CONNECTION_STRING=$STORAGE_CONN
+CDSS_AZURE_BLOB_ENDPOINT=$STORAGE_EP
+CDSS_AZURE_BLOB_USE_ENTRA_ID=$STORAGE_USE_ENTRA_ID
 CDSS_AZURE_BLOB_PROTOCOLS_CONTAINER=protocols
 
 # ── PubMed / NCBI Entrez ─────────────────────────────────────────────────────
@@ -108,4 +250,8 @@ EOF
 echo "✅ Created .env.azure"
 echo "✅ Created .env with all Azure credentials"
 echo ""
-echo "Next: ./infra/scripts/seed-data.sh dev"
+if [[ "$ENVIRONMENT" == "prod" ]]; then
+    echo "Next: ./infra/scripts/seed-data-infra-network.sh $RG"
+else
+    echo "Next: python infra/scripts/seed_data.py --environment $ENVIRONMENT"
+fi

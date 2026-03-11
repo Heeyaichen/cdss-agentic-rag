@@ -283,8 +283,10 @@ if [[ -n "${EXTRA_BICEP_PARAMS}" ]]; then
     DEPLOY_CMD="${DEPLOY_CMD} --parameters ${EXTRA_BICEP_PARAMS}"
 fi
 
+set +e
 DEPLOY_OUTPUT=$(eval "$DEPLOY_CMD" --output json 2>&1)
 DEPLOY_STATUS=$?
+set -e
 
 if [[ $DEPLOY_STATUS -ne 0 ]]; then
     log_error "Deployment failed!"
@@ -404,6 +406,7 @@ CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX=medical-literature
 # ── Azure Cosmos DB ───────────────────────────────────────────────────────────
 CDSS_AZURE_COSMOS_ENDPOINT=${COSMOS_ENDPOINT}
 CDSS_AZURE_COSMOS_KEY=${COSMOS_KEY}
+CDSS_AZURE_COSMOS_USE_ENTRA_ID=false
 CDSS_AZURE_COSMOS_DATABASE_NAME=cdss-db
 CDSS_AZURE_COSMOS_PATIENT_PROFILES_CONTAINER=patient-profiles
 CDSS_AZURE_COSMOS_CONVERSATION_HISTORY_CONTAINER=conversation-history
