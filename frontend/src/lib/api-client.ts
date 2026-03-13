@@ -1,6 +1,6 @@
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
 import { msalInstance } from './auth';
-import { ApiError, PatientProfile } from './types';
+import { ApiError, DocumentIngestResponse, DocumentIngestionStatusResponse, PatientProfile } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 const API_SCOPE = import.meta.env.VITE_API_SCOPE || '';
@@ -111,16 +111,24 @@ export const clinicalApi = {
     return apiClient.post('/v1/search/protocols', params);
   },
 
-  ingestDocument: async (file: File, documentType: string, metadata?: Record<string, unknown>) => {
+  ingestDocument: async (
+    file: File,
+    documentType: string,
+    metadata?: Record<string, unknown>
+  ): Promise<DocumentIngestResponse> => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('document_type', documentType);
     if (metadata) {
       formData.append('metadata', JSON.stringify(metadata));
     }
-    return apiClient.post('/v1/documents/ingest', formData, {
+    return apiClient.post<DocumentIngestResponse>('/v1/documents/ingest', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
+  },
+
+  getDocumentIngestionStatus: async (documentId: string): Promise<DocumentIngestionStatusResponse> => {
+    return apiClient.get<DocumentIngestionStatusResponse>(`/v1/documents/${documentId}/status`);
   },
 
   getAuditTrail: async (params: {

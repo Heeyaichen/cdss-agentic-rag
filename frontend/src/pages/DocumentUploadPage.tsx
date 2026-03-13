@@ -24,6 +24,7 @@ import {
   UploadFile,
 } from "@mui/icons-material";
 import { clinicalApi } from "@/lib/api-client";
+import type { DocumentIngestionStatusResponse } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
 
 type PipelineStage = "queued" | "uploading" | "parsing" | "indexing" | "completed" | "error";
@@ -37,6 +38,9 @@ interface PipelineFile {
   documentId?: string;
 }
 
+const DEFAULT_DOCUMENT_TYPE = "patient_record";
+const POLL_INTERVAL_MS = 1200;
+const MAX_POLL_ATTEMPTS = 120;
 const STAGE_ORDER: PipelineStage[] = ["queued", "uploading", "parsing", "indexing", "completed"];
 
 function wait(ms: number): Promise<void> {
@@ -45,12 +49,51 @@ function wait(ms: number): Promise<void> {
   });
 }
 
+function clampProgress(value?: number): number {
+  if (typeof value !== "number" || Number.isNaN(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function mapStatusToStage(payload: DocumentIngestionStatusResponse): { stage: PipelineStage; progress: number } {
+  const status = payload.status;
+  const progress = clampProgress(payload.progress);
+
+  if (status === "completed") {
+    return { stage: "completed", progress: 100 };
+  }
+  if (status === "failed" || status === "error" || status === "not_found") {
+    return { stage: "error", progress: Math.max(progress, 100) };
+  }
+  if (status === "queued" || status === "pending") {
+    return { stage: "queued", progress: Math.max(0, Math.min(progress, 10)) };
+  }
+  if (progress < 30) {
+    return { stage: "uploading", progress: Math.max(progress, 12) };
+  }
+  if (progress < 70) {
+    return { stage: "parsing", progress };
+  }
+  return { stage: "indexing", progress };
+}
+
+function statusMessage(payload: DocumentIngestionStatusResponse, stage: PipelineStage): string {
+  if (payload.error) return payload.error;
+  if (payload.message) return payload.message;
+  if (stage === "queued") return "Document queued for background processing.";
+  if (stage === "uploading") return "Uploading payload and scheduling ingestion.";
+  if (stage === "parsing") return "Extracting and parsing clinical document content.";
+  if (stage === "indexing") return "Generating embeddings and indexing retrieval chunks.";
+  if (stage === "completed") return "Document indexed and available for search.";
+  return "Document ingestion failed.";
+}
+
 function stageColor(stage: PipelineStage): string {
   if (stage === "completed") return semantic.success.main;
   if (stage === "error") return severity.major.main;
   if (stage === "indexing") return semantic.info.main;
   if (stage === "parsing") return semantic.warning.main;
-  return "text.secondary";
+  if (stage === "uploading") return semantic.info.main;
+  return "#6B7280";
 }
 
 function stageLabel(stage: PipelineStage): string {
@@ -71,6 +114,13 @@ function formatFileSize(bytes: number): string {
 export default function DocumentUploadPage() {
   const [pipelineFiles, setPipelineFiles] = React.useState<PipelineFile[]>([]);
   const [dragActive, setDragActive] = React.useState(false);
+  const isMountedRef = React.useRef(true);
+
+  React.useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const addFiles = (incoming: File[]) => {
     if (incoming.length === 0) return;
@@ -96,40 +146,63 @@ export default function DocumentUploadPage() {
     setPipelineFiles((prev) => prev.filter((entry) => entry.id !== fileId));
   };
 
+  const pollDocumentStatus = async (fileId: string, documentId: string): Promise<void> => {
+    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
+      if (!isMountedRef.current) return;
+      try {
+        const statusPayload = await clinicalApi.getDocumentIngestionStatus(documentId);
+        const { stage, progress } = mapStatusToStage(statusPayload);
+        updateFile(fileId, {
+          stage,
+          progress,
+          message: statusMessage(statusPayload, stage),
+        });
+
+        if (stage === "completed" || stage === "error") {
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to poll document status.";
+        if (attempt >= 2) {
+          updateFile(fileId, {
+            stage: "error",
+            progress: 100,
+            message,
+          });
+          return;
+        }
+      }
+      await wait(POLL_INTERVAL_MS);
+    }
+
+    updateFile(fileId, {
+      stage: "error",
+      progress: 100,
+      message: "Timed out while polling ingestion status.",
+    });
+  };
+
   const runPipeline = async (entry: PipelineFile) => {
-    updateFile(entry.id, { stage: "uploading", progress: 18, message: "Uploading document payload..." });
+    updateFile(entry.id, {
+      stage: "uploading",
+      progress: 6,
+      message: "Submitting document for ingestion.",
+    });
 
     try {
-      const response = (await clinicalApi.ingestDocument(entry.file, "clinical_document")) as {
-        document_id?: string;
-        status?: string;
-        message?: string;
-      };
-
-      if (response.status === "error") {
-        throw new Error(response.message || "Ingestion failed");
+      const response = await clinicalApi.ingestDocument(entry.file, DEFAULT_DOCUMENT_TYPE);
+      if (!response.document_id) {
+        throw new Error("Missing document_id from ingestion response.");
       }
 
       updateFile(entry.id, {
-        stage: "parsing",
-        progress: 48,
+        stage: "queued",
+        progress: 10,
         documentId: response.document_id,
-        message: response.message || "Document received. Parsing clinical text.",
+        message: response.message || "Document queued for processing.",
       });
-      await wait(450);
 
-      updateFile(entry.id, {
-        stage: "indexing",
-        progress: 78,
-        message: "Building embeddings and indexing chunks.",
-      });
-      await wait(500);
-
-      updateFile(entry.id, {
-        stage: "completed",
-        progress: 100,
-        message: "Document indexed and ready for retrieval.",
-      });
+      await pollDocumentStatus(entry.id, response.document_id);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unexpected ingestion error";
       updateFile(entry.id, {
@@ -150,8 +223,15 @@ export default function DocumentUploadPage() {
   const retryFile = async (fileId: string) => {
     const entry = pipelineFiles.find((item) => item.id === fileId);
     if (!entry) return;
-    updateFile(entry.id, { stage: "queued", progress: 0, message: undefined, documentId: undefined });
-    await runPipeline({ ...entry, stage: "queued", progress: 0, message: undefined, documentId: undefined });
+    const resetEntry: PipelineFile = {
+      ...entry,
+      stage: "queued",
+      progress: 0,
+      message: undefined,
+      documentId: undefined,
+    };
+    updateFile(fileId, resetEntry);
+    await runPipeline(resetEntry);
   };
 
   const completedCount = pipelineFiles.filter((entry) => entry.stage === "completed").length;
@@ -167,7 +247,7 @@ export default function DocumentUploadPage() {
           Documents Ingestion Pipeline
         </Typography>
         <Typography variant="body2" color="text.secondary">
-          Upload, parse, and index clinical documents with timeline visibility, failure recovery, and retry controls.
+          Upload, parse, and index clinical documents with timeline visibility, backend status polling, and retry controls.
         </Typography>
       </Box>
 
@@ -204,7 +284,7 @@ export default function DocumentUploadPage() {
                     Drop files to ingest
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    PDF, DOCX, TXT, PNG, JPG
+                    PDF, DOCX, TXT
                   </Typography>
 
                   <Button variant="outlined" component="label" startIcon={<UploadFile />} sx={{ mt: 2 }}>
@@ -213,7 +293,7 @@ export default function DocumentUploadPage() {
                       hidden
                       type="file"
                       multiple
-                      accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
+                      accept=".pdf,.docx,.txt"
                       onChange={(event) => addFiles(Array.from(event.target.files ?? []))}
                     />
                   </Button>
@@ -266,15 +346,14 @@ export default function DocumentUploadPage() {
                   <Description sx={{ fontSize: 44, color: "text.disabled", mb: 1 }} />
                   <Typography variant="h6">No files in queue</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Add documents to visualize parsing/index timelines and ingest readiness.
+                    Add documents to track backend ingestion states in real time.
                   </Typography>
                 </CardContent>
               </Card>
             )}
 
             {pipelineFiles.map((entry) => {
-              const activeStep =
-                entry.stage === "error" ? 1 : Math.max(STAGE_ORDER.findIndex((item) => item === entry.stage), 0);
+              const activeStep = entry.stage === "error" ? 1 : Math.max(STAGE_ORDER.findIndex((item) => item === entry.stage), 0);
 
               return (
                 <Card key={entry.id} sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>

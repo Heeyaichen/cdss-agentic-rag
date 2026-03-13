@@ -5,6 +5,19 @@ import { mockArticles } from './data/literature';
 import { mockAuditLog, mockDashboardStats } from './data/audit';
 
 const API_BASE = '/api/v1';
+type MockIngestionStatus = {
+  document_id: string;
+  filename: string;
+  document_type: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  progress: number;
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+  poll_count: number;
+};
+
+const mockIngestionJobs = new Map<string, MockIngestionStatus>();
 
 export const handlers = [
   // Health check
@@ -170,14 +183,70 @@ export const handlers = [
   }),
 
   // Document ingestion
-  http.post(`${API_BASE}/documents/ingest`, async () => {
+  http.post(`${API_BASE}/documents/ingest`, async ({ request }) => {
     await delay(1000);
+    const formData = await request.formData();
+    const file = formData.get('file');
+    const documentType = String(formData.get('document_type') || 'patient_record');
+    const documentId = 'doc_' + Date.now();
+    const now = new Date().toISOString();
+
+    mockIngestionJobs.set(documentId, {
+      document_id: documentId,
+      filename: file instanceof File ? file.name : 'uploaded-document',
+      document_type: documentType,
+      status: 'queued',
+      progress: 0,
+      created_at: now,
+      updated_at: now,
+      error: null,
+      poll_count: 0,
+    });
+
     return HttpResponse.json({
-      document_id: 'doc_' + Date.now(),
-      status: 'processing',
+      document_id: documentId,
+      status: 'queued',
       message: 'Document accepted for ingestion. Processing started.',
       estimated_completion_seconds: 45,
       chunks_count: Math.floor(Math.random() * 20) + 5,
+    });
+  }),
+
+  // Document ingestion status
+  http.get(`${API_BASE}/documents/:documentId/status`, async ({ params }) => {
+    await delay(350);
+    const documentId = String(params.documentId);
+    const current = mockIngestionJobs.get(documentId);
+
+    if (!current) {
+      return HttpResponse.json({ detail: `Document '${documentId}' not found.` }, { status: 404 });
+    }
+
+    const next = { ...current };
+    next.poll_count += 1;
+    next.updated_at = new Date().toISOString();
+
+    if (next.status === 'queued') {
+      next.status = 'processing';
+      next.progress = 15;
+    } else if (next.status === 'processing') {
+      next.progress = Math.min(100, next.progress + 25 + Math.floor(Math.random() * 20));
+      if (next.progress >= 100) {
+        next.status = 'completed';
+        next.progress = 100;
+      }
+    }
+
+    mockIngestionJobs.set(documentId, next);
+    return HttpResponse.json({
+      document_id: next.document_id,
+      filename: next.filename,
+      document_type: next.document_type,
+      status: next.status,
+      progress: next.progress,
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+      error: next.error,
     });
   }),
 

@@ -240,6 +240,19 @@ export interface DocumentIngestResponse {
   chunks_count?: number;
 }
 
+export interface DocumentIngestionStatusResponse {
+  document_id: string;
+  filename?: string;
+  document_type?: string;
+  patient_id?: string | null;
+  status: 'queued' | 'pending' | 'processing' | 'completed' | 'failed' | 'error' | 'not_found';
+  progress: number;
+  created_at?: string;
+  updated_at?: string;
+  error?: string | null;
+  message?: string;
+}
+
 export interface HealthCheckResponse {
   status: 'healthy' | 'degraded' | 'unhealthy';
   version: string;
