@@ -1,36 +1,38 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Card,
   CardContent,
   Typography,
+  Button,
+  Grid,
+  Paper,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
-  Paper,
-  Chip,
   TextField,
-  Button,
-  Grid,
+  Chip,
 } from '@mui/material';
 import { Search } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
-import { clinicalApi } from '@/lib/api-client';
 import dayjs from 'dayjs';
+import { clinicalApi } from '@/lib/api-client';
+
+interface AuditRow {
+  timestamp: string;
+  event_type: string;
+  actor?: { clinician_id?: string };
+  action: string;
+  resource?: { type?: string };
+  outcome: string;
+  data_sent_to_llm?: boolean;
+}
+
+type SystemStatus = 'connected' | 'operational' | 'warning' | 'error';
 
 export default function AdminPage() {
-  // Local type for audit log rows to provide proper typing for rendering
-  type AuditRow = {
-    timestamp: string;
-    event_type: string;
-    actor?: { clinician_id?: string };
-    action: string;
-    resource?: { type?: string };
-    outcome: string;
-    data_sent_to_llm: boolean;
-  };
   const [filters, setFilters] = useState({
     start_date: '',
     end_date: '',
@@ -140,7 +142,7 @@ export default function AdminPage() {
                 </TableCell>
               </TableRow>
             ) : (
-              (((auditData as AuditRow[]) ?? [] as AuditRow[]).slice(0, 50)).map((entry: AuditRow, i: number) => (
+              (((auditData as AuditRow[]) ?? []).slice(0, 50)).map((entry: AuditRow, i: number) => (
                 <TableRow key={i} hover>
                   <TableCell>
                     {dayjs(entry.timestamp).format('YYYY-MM-DD HH:mm:ss')}
@@ -153,7 +155,7 @@ export default function AdminPage() {
                     <Chip
                       label={entry.outcome}
                       size="small"
-                      color={getOutcomeColor(entry.outcome) as any}
+                      color={getOutcomeColor(entry.outcome) as 'success' | 'error' | 'warning' | 'default'}
                     />
                   </TableCell>
                   <TableCell>

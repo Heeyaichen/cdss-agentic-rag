@@ -1,9 +1,25 @@
 import React from 'react';
-import { Box, Grid, Card, CardContent, Typography, Paper, Chip, useTheme, alpha } from '@mui/material';
+import { Box, Grid, Card, CardContent, Typography, Paper, Chip, useTheme } from '@mui/material';
 import { QueryStats, Person, Medication, Description, Warning, CheckCircle, Science } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { clinicalApi } from '@/lib/api-client';
 import { DashboardSkeleton } from '@/components/common/LoadingSkeleton';
+// Design tokens
+import {
+  primary,
+  semantic,
+  severity,
+  clinical,
+  alpha as alphaUtil,
+  componentShadows,
+  clinicalShadows,
+  interactiveShadows,
+  spacing,
+  borderRadius,
+  transitions,
+  opacity,
+  neutral,
+} from '@/theme';
 
 interface StatCardProps {
   title: string;
@@ -14,20 +30,57 @@ interface StatCardProps {
 }
 
 function StatCard({ title, value, icon, color, subtitle }: StatCardProps) {
-  
   return (
-    <Card sx={{ height: '100%' }}>
-      <CardContent>
+    <Card
+      sx={{
+        height: '100%',
+        borderRadius: borderRadius.md,
+        boxShadow: componentShadows.card,
+        border: `1px solid ${alphaUtil(color, opacity.light)}`,
+        transition: `${transitions.shadow.standard}, ${transitions.transform.standard}, ${transitions.border.standard}`,
+        '&:hover': {
+          boxShadow: interactiveShadows.hover,
+          transform: 'translateY(-2px)',
+          borderColor: alphaUtil(color, opacity.medium),
+        },
+      }}
+    >
+      <CardContent sx={{ p: spacing[4] }}>
         <Box display="flex" alignItems="center" justifyContent="space-between">
-          <Box>
-            <Typography color="text.secondary" variant="body2" gutterBottom>
+          <Box flex={1} minWidth={0}>
+            <Typography
+              variant="body2"
+              sx={{
+                color: 'text.secondary',
+                fontWeight: 500,
+                letterSpacing: '0.025em',
+                mb: 0.5,
+                textTransform: 'uppercase',
+                fontSize: '0.7rem',
+              }}
+            >
               {title}
             </Typography>
-            <Typography variant="h4" fontWeight={600}>
+            <Typography
+              variant="h4"
+              sx={{
+                fontWeight: 700,
+                color: 'text.primary',
+                lineHeight: 1.2,
+                mb: 0.25,
+              }}
+            >
               {value}
             </Typography>
             {subtitle && (
-              <Typography variant="caption" color="text.secondary">
+              <Typography
+                variant="caption"
+                sx={{
+                  color: color,
+                  fontWeight: 500,
+                  display: 'block',
+                }}
+              >
                 {subtitle}
               </Typography>
             )}
@@ -35,9 +88,12 @@ function StatCard({ title, value, icon, color, subtitle }: StatCardProps) {
           <Box
             sx={{
               p: 1.5,
-              borderRadius: 2,
-              bgcolor: alpha(color, 0.1),
+              borderRadius: borderRadius.md,
+              bgcolor: alphaUtil(color, opacity.light),
               color: color,
+              transition: transitions.background.standard,
+              flexShrink: 0,
+              ml: 2,
             }}
           >
             {icon}
@@ -50,7 +106,7 @@ function StatCard({ title, value, icon, color, subtitle }: StatCardProps) {
 
 export default function Dashboard() {
   const theme = useTheme();
-  
+
   const { data: patientData, isLoading: patientsLoading } = useQuery<any>({
     queryKey: ['patients', 'search', '', 1, 100],
     queryFn: () => clinicalApi.searchPatients({ search: '', page: 1, limit: 100 }),
@@ -80,28 +136,59 @@ export default function Dashboard() {
   ];
 
   const quickActions = [
-    { label: 'New Query', path: '/query', icon: <QueryStats />, color: theme.palette.primary.main },
-    { label: 'View Patients', path: '/patients', icon: <Person />, color: theme.palette.success.main },
-    { label: 'Drug Check', path: '/drugs', icon: <Medication />, color: theme.palette.warning.main },
-    { label: 'Literature', path: '/literature', icon: <Science />, color: theme.palette.info.main },
+    { label: 'New Query', path: '/query', icon: <QueryStats />, color: primary.main },
+    { label: 'View Patients', path: '/patients', icon: <Person />, color: semantic.success.main },
+    { label: 'Drug Check', path: '/drugs', icon: <Medication />, color: semantic.warning.main },
+    { label: 'Literature', path: '/literature', icon: <Science />, color: semantic.info.main },
   ];
+
+  // Get status color using clinical tokens
+  const getActivityStatusColor = (status: string) => {
+    if (status === 'warning') return semantic.warning.main;
+    return semantic.success.main;
+  };
+
+  const getServiceStatusColor = (status: string) => {
+    if (status === 'healthy') return semantic.success.main;
+    if (status === 'degraded') return semantic.warning.main;
+    return semantic.error.main;
+  };
 
   return (
     <Box>
-      <Typography variant="h4" gutterBottom fontWeight={600}>
-        Dashboard
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 4 }}>
-        Clinical Decision Support System Overview
-      </Typography>
+      {/* Header Section */}
+      <Box sx={{ mb: spacing[8] }}>
+        <Typography
+          variant="h4"
+          sx={{
+            fontWeight: 700,
+            color: 'text.primary',
+            mb: spacing[1],
+            letterSpacing: '-0.015em',
+          }}
+        >
+          Dashboard
+        </Typography>
+        <Typography
+          variant="body2"
+          sx={{
+            color: 'text.secondary',
+            letterSpacing: '0.015em',
+            fontWeight: 400,
+          }}
+        >
+          Clinical Decision Support System Overview
+        </Typography>
+      </Box>
 
-      <Grid container spacing={3}>
+      {/* Stats Cards Grid */}
+      <Grid container spacing={spacing[6]}>
         <Grid item xs={12} sm={6} md={3}>
           <StatCard
             title="Total Patients"
             value={totalPatients}
             icon={<Person sx={{ fontSize: 32 }} />}
-            color={theme.palette.success.main}
+            color={clinical.patientStatus.active}
             subtitle="Active records"
           />
         </Grid>
@@ -111,7 +198,7 @@ export default function Dashboard() {
             title="Queries Today"
             value={142}
             icon={<QueryStats sx={{ fontSize: 32 }} />}
-            color={theme.palette.primary.main}
+            color={primary.main}
             subtitle="Clinical queries processed"
           />
         </Grid>
@@ -121,7 +208,7 @@ export default function Dashboard() {
             title="Drug Alerts"
             value={23}
             icon={<Warning sx={{ fontSize: 32 }} />}
-            color={theme.palette.warning.main}
+            color={severity.moderate.main}
             subtitle="Requiring review"
           />
         </Grid>
@@ -131,39 +218,68 @@ export default function Dashboard() {
             title="System Health"
             value={systemStatus === 'healthy' ? '99.9%' : systemStatus}
             icon={<CheckCircle sx={{ fontSize: 32 }} />}
-            color={systemStatus === 'healthy' ? theme.palette.success.main : theme.palette.error.main}
+            color={systemStatus === 'healthy' ? semantic.success.main : semantic.error.main}
             subtitle="Uptime this month"
           />
         </Grid>
       </Grid>
 
-      <Grid container spacing={3} sx={{ mt: 2 }}>
+      {/* Main Content Grid */}
+      <Grid container spacing={spacing[6]} sx={{ mt: spacing[2] }}>
+        {/* Recent Activity Section */}
         <Grid item xs={12} md={8}>
-          <Paper sx={{ p: 3 }}>
-            <Typography variant="h6" gutterBottom fontWeight={600}>
+          <Paper
+            sx={{
+              p: spacing[6],
+              borderRadius: borderRadius.lg,
+              boxShadow: componentShadows.card,
+              transition: transitions.shadow.standard,
+              '&:hover': {
+                boxShadow: componentShadows.cardHover,
+              },
+            }}
+          >
+            <Typography
+              variant="h6"
+              sx={{
+                fontWeight: 600,
+                color: 'text.primary',
+                mb: spacing[4],
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+              }}
+            >
               Recent Activity
             </Typography>
-            {recentActivity.map((activity) => (
+            {recentActivity.map((activity, index) => (
               <Box
                 key={activity.id}
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
-                  py: 1.5,
-                  borderBottom: `1px solid ${theme.palette.divider}`,
-                  '&:last-child': { borderBottom: 'none' },
+                  py: spacing[3],
+                  px: spacing[2],
+                  mx: -spacing[2],
+                  borderRadius: borderRadius.sm,
+                  transition: transitions.background.standard,
+                  borderBottom:
+                    index === recentActivity.length - 1
+                      ? 'none'
+                      : `1px solid ${alphaUtil(neutral[200], 0.5)}`,
+                  '&:hover': {
+                    bgcolor: alphaUtil(primary.main, opacity.subtle),
+                  },
                 }}
               >
                 <Box
                   sx={{
-                    p: 1,
-                    borderRadius: 1,
-                    bgcolor: alpha(
-                      activity.status === 'warning' ? theme.palette.warning.main : theme.palette.primary.main,
-                      0.1
-                    ),
-                    color: activity.status === 'warning' ? theme.palette.warning.main : theme.palette.primary.main,
-                    mr: 2,
+                    p: spacing[2],
+                    borderRadius: borderRadius.sm,
+                    bgcolor: alphaUtil(getActivityStatusColor(activity.status), opacity.light),
+                    color: getActivityStatusColor(activity.status),
+                    mr: spacing[4],
+                    transition: transitions.background.standard,
                   }}
                 >
                   {activity.type === 'query' && <QueryStats fontSize="small" />}
@@ -171,46 +287,121 @@ export default function Dashboard() {
                   {activity.type === 'drug' && <Medication fontSize="small" />}
                   {activity.type === 'document' && <Description fontSize="small" />}
                 </Box>
-                <Box sx={{ flex: 1 }}>
-                  <Typography variant="body2">{activity.description}</Typography>
-                  <Typography variant="caption" color="text.secondary">
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontWeight: 500,
+                      color: 'text.primary',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {activity.description}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: 'text.secondary',
+                      mt: 0.25,
+                      display: 'block',
+                    }}
+                  >
                     {activity.time}
                   </Typography>
                 </Box>
                 <Chip
                   label={activity.status}
                   size="small"
-                  color={activity.status === 'warning' ? 'warning' : 'success'}
+                  sx={{
+                    borderRadius: borderRadius.xs,
+                    fontWeight: 500,
+                    textTransform: 'capitalize',
+                    ...(activity.status === 'warning'
+                      ? {
+                          bgcolor: alphaUtil(semantic.warning.main, opacity.medium),
+                          color: semantic.warning.dark,
+                        }
+                      : {
+                          bgcolor: alphaUtil(semantic.success.main, opacity.medium),
+                          color: semantic.success.dark,
+                        }),
+                  }}
                 />
               </Box>
             ))}
           </Paper>
         </Grid>
 
+        {/* Right Sidebar */}
         <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 3, mb: 3 }}>
-            <Typography variant="h6" gutterBottom fontWeight={600}>
+          {/* Quick Actions */}
+          <Paper
+            sx={{
+              p: spacing[6],
+              mb: spacing[6],
+              borderRadius: borderRadius.lg,
+              boxShadow: componentShadows.card,
+              transition: transitions.shadow.standard,
+              '&:hover': {
+                boxShadow: componentShadows.cardHover,
+              },
+            }}
+          >
+            <Typography
+              variant="h6"
+              sx={{
+                fontWeight: 600,
+                color: 'text.primary',
+                mb: spacing[4],
+              }}
+            >
               Quick Actions
             </Typography>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: spacing[1] }}>
               {quickActions.map((action) => (
                 <Box
                   key={action.label}
+                  component="button"
+                  tabIndex={0}
+                  aria-label={action.label}
+                  onClick={() => window.location.href = action.path}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      window.location.href = action.path;
+                    }
+                  }}
                   sx={{
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 2,
-                    p: 1.5,
-                    borderRadius: 1,
+                    gap: spacing[4],
+                    p: spacing[3],
+                    borderRadius: borderRadius.sm,
                     cursor: 'pointer',
-                    transition: 'all 0.2s',
+                    transition: `${transitions.background.standard}, ${transitions.transform.standard}`,
+                    bgcolor: 'transparent',
+                    border: '1px solid transparent',
                     '&:hover': {
-                      bgcolor: alpha(action.color, 0.1),
+                      bgcolor: alphaUtil(action.color, opacity.light),
+                      borderColor: alphaUtil(action.color, opacity.medium),
+                      transform: 'translateX(4px)',
+                    },
+                    '&:focus-visible': {
+                      outline: `2px solid ${action.color}`,
+                      outlineOffset: '2px',
+                      bgcolor: alphaUtil(action.color, opacity.light),
                     },
                   }}
                 >
                   <Box sx={{ color: action.color }}>{action.icon}</Box>
-                  <Typography variant="body2" fontWeight={500}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontWeight: 500,
+                      color: 'text.primary',
+                    }}
+                  >
                     {action.label}
                   </Typography>
                 </Box>
@@ -218,29 +409,88 @@ export default function Dashboard() {
             </Box>
           </Paper>
 
-          <Paper sx={{ p: 3 }}>
-            <Typography variant="h6" gutterBottom fontWeight={600}>
+          {/* System Status */}
+          <Paper
+            sx={{
+              p: spacing[6],
+              borderRadius: borderRadius.lg,
+              boxShadow: componentShadows.card,
+              transition: transitions.shadow.standard,
+              '&:hover': {
+                boxShadow: componentShadows.cardHover,
+              },
+            }}
+          >
+            <Typography
+              variant="h6"
+              sx={{
+                fontWeight: 600,
+                color: 'text.primary',
+                mb: spacing[4],
+                display: 'flex',
+                alignItems: 'center',
+                gap: 0.5,
+              }}
+            >
+              <CheckCircle sx={{ fontSize: 20, color: semantic.success.main }} />
               System Status
             </Typography>
-            {Object.entries(services).map(([service, status]) => (
+            {Object.entries(services).map(([service, status], index, arr) => (
               <Box
                 key={service}
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  py: 1,
-                  borderBottom: `1px solid ${theme.palette.divider}`,
-                  '&:last-child': { borderBottom: 'none' },
+                  py: spacing[3],
+                  px: spacing[2],
+                  borderRadius: borderRadius.sm,
+                  transition: transitions.background.standard,
+                  borderBottom: index === arr.length - 1 ? 'none' : `1px solid ${theme.palette.divider}`,
+                  '&:hover': {
+                    bgcolor: alphaUtil(getServiceStatusColor(status), opacity.light),
+                  },
                 }}
               >
-                <Typography variant="body2" sx={{ textTransform: 'capitalize' }}>
-                  {service.replace(/_/g, ' ')}
-                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  {status === 'healthy' && (
+                    <CheckCircle sx={{ fontSize: 16, color: semantic.success.main }} />
+                  )}
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      textTransform: 'capitalize',
+                      color: 'text.primary',
+                      fontWeight: 500,
+                    }}
+                  >
+                    {service.replace(/_/g, ' ')}
+                  </Typography>
+                </Box>
                 <Chip
                   label={status}
                   size="small"
-                  color={status === 'healthy' ? 'success' : status === 'degraded' ? 'warning' : 'error'}
+                  sx={{
+                    borderRadius: borderRadius.xs,
+                    fontWeight: 500,
+                    textTransform: 'capitalize',
+                    ...(status === 'healthy'
+                      ? {
+                          bgcolor: alphaUtil(semantic.success.main, opacity.medium),
+                          color: semantic.success.dark,
+                          boxShadow: clinicalShadows.success,
+                        }
+                      : status === 'degraded'
+                        ? {
+                            bgcolor: alphaUtil(semantic.warning.main, opacity.medium),
+                            color: semantic.warning.dark,
+                            boxShadow: clinicalShadows.warning,
+                          }
+                        : {
+                            bgcolor: alphaUtil(semantic.error.main, opacity.medium),
+                            color: semantic.error.dark,
+                          }),
+                  }}
                 />
               </Box>
             ))}

@@ -80,10 +80,12 @@ export interface Citation {
 }
 
 export interface DrugAlert {
+  id: string;
   severity: 'minor' | 'moderate' | 'major';
   description: string;
   source: string;
   evidence_level: number;
+  clinical_significance?: string;
   alternatives: string[];
 }
 
@@ -99,6 +101,11 @@ export interface ClinicalResponse {
   assessment: string;
   recommendation: string;
   evidence_summary: string[];
+  evidence?: {
+    level: string;
+    sources: string[];
+    confidence: number;
+  };
   drug_alerts: DrugAlert[];
   confidence_score: number;
   citations: Citation[];
