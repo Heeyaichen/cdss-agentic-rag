@@ -602,11 +602,11 @@ pytest tests/ -v --cov=cdss --cov-report=term-missing
 # Run only unit tests
 pytest tests/unit/ -v
 
-# Run only integration tests (requires Azure credentials)
-pytest tests/integration/ -v --run-integration
+# Run integration coverage tests (mocked external dependencies)
+pytest tests/integration/ -v
 
-# Run end-to-end tests (requires full infrastructure)
-pytest tests/e2e/ -v --run-e2e
+# Run the integration E2E workflow test module
+pytest tests/integration/test_e2e.py -v
 
 # Run with parallel execution
 pytest tests/ -v -n auto --cov=cdss
