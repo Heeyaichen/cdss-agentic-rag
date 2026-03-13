@@ -129,3 +129,6 @@ temp/
 node_modules/
 *.tsbuildinfo
 dist/
+
+frontend/playwright-report/
+frontend/test-results/
