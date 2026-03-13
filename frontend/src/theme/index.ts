@@ -1,28 +1,25 @@
 /**
  * CDSS Theme System - Main Entry Point
  *
- * Comprehensive design system for Clinical Decision Support System.
- * Exports all design tokens, creates MUI themes, and provides utilities.
+ * Production-ready design system for clinical AI workflows using MUI theming
+ * + CSS variables with light/dark parity and compact/comfortable density modes.
  *
  * @module theme
  */
 
-import { createTheme, Theme, ThemeOptions } from "@mui/material/styles";
+import { createTheme } from "@mui/material/styles";
+import type { Theme, ThemeOptions } from "@mui/material/styles";
+import type {} from "@mui/x-data-grid/themeAugmentation";
 
 // ============================================================================
-// RE-EXPORT ALL DESIGN TOKENS
+// RE-EXPORT DESIGN TOKENS
 // ============================================================================
 
 export {
-  // Spacing
   spacing,
   type Spacing,
-
-  // Border radius
   borderRadius,
   type BorderRadius,
-
-  // Typography
   typography,
   fontSize,
   fontWeight,
@@ -32,70 +29,48 @@ export {
   type FontWeight,
   type LineHeight,
   type LetterSpacing,
-
-  // Elevation
   elevation,
   type Elevation,
-
-  // Motion container
   motion,
-  
-  // Z-index
   zIndex,
   type ZIndex,
-
-  // Breakpoints
   breakpoints,
   type Breakpoint,
-
-  // Opacity
   opacity,
   type Opacity,
-
-  // Component sizes
   componentSize,
-
-  // Complete token collection
+  focusRing,
+  density,
+  type DensityMode,
+  type DensityTokens,
   designTokens,
   type DesignTokens,
-} from './designTokens';
+} from "./designTokens";
 
 // ============================================================================
-// RE-EXPORT PALETTE
+// RE-EXPORT PALETTE TOKENS
 // ============================================================================
 
 export {
-  // Primary colors
   primary,
   secondary,
-  
-  // Severity colors (SEMANTICALLY STABLE)
   severity,
   type SeverityLevel,
-  
-  // Semantic colors
   semantic,
-  
-  // Neutral colors
+  semanticRoles,
+  medicalStatusTokens,
+  type MedicalStatus,
   neutral,
-  
-  // Mode palettes
   lightPalette,
   darkPalette,
-  
-  // Clinical colors
   clinical,
-  
-  // Utilities
   alpha,
   generateCssCustomProperties,
-  
-  // Types
   type PaletteMode,
-} from './palette';
+} from "./palette";
 
 // ============================================================================
-// RE-EXPORT TYPOGRAPHY
+// RE-EXPORT TYPOGRAPHY / SHADOW / MOTION
 // ============================================================================
 
 export {
@@ -112,11 +87,7 @@ export {
   type LineHeight as TypographyLineHeight,
   type LetterSpacing as TypographyLetterSpacing,
   type ClinicalTypography,
-} from './typography';
-
-// ============================================================================
-// RE-EXPORT SHADOWS
-// ============================================================================
+} from "./typography";
 
 export {
   shadows,
@@ -129,7 +100,7 @@ export {
   type ClinicalShadow,
   type InteractiveShadow,
   type ComponentShadow,
-} from './shadows';
+} from "./shadows";
 
 export {
   duration,
@@ -143,213 +114,461 @@ export {
   type Transitions,
   type Keyframes,
   type Animations,
-} from './motion';
+} from "./motion";
 
 // ============================================================================
-// THEME CREATION
+// INTERNAL IMPORTS
 // ============================================================================
 
-import { lightPalette, darkPalette, severity, clinical, semantic } from './palette';
-import { typographyOptions } from './typography';
-import { shadows, darkShadows, clinicalShadows, componentShadows } from './shadows';
-import { duration, easing, transitions } from './motion';
-import { borderRadius, zIndex } from './designTokens';
+import { borderRadius, density, focusRing, zIndex } from "./designTokens";
+import { duration, easing, transitions } from "./motion";
+import {
+  clinical,
+  darkPalette,
+  lightPalette,
+  medicalStatusTokens,
+  semantic,
+  semanticRoles,
+  severity,
+} from "./palette";
+import { clinicalShadows, componentShadows, darkShadows, shadows } from "./shadows";
+import { fontFamily, typographyOptions } from "./typography";
 
-/**
- * Theme options for light mode.
- */
-const lightThemeOptions: ThemeOptions = {
-  palette: lightPalette,
-  typography: typographyOptions,
-  shadows: shadows as unknown as Theme['shadows'],
-  shape: {
-    borderRadius: borderRadius.md,
-  },
-  spacing: (factor: number) => `${factor * 4}px`,
-  zIndex: {
-    mobileStepper: zIndex.dropdown,
-    speedDial: zIndex.dropdown,
-    appBar: zIndex.fixed,
-    drawer: zIndex.sticky,
-    modal: zIndex.modal,
-    snackbar: zIndex.toast,
-    tooltip: zIndex.tooltip,
-  },
-  transitions: {
-    duration: {
-      shortest: duration.fast,
-      shorter: duration.micro,
-      short: duration.standard,
-      standard: duration.standard,
-      complex: duration.slow,
-      enteringScreen: duration.slow,
-      leavingScreen: duration.standard,
+type SupportedMode = "light" | "dark";
+
+export interface CreateCDSSThemeOptions {
+  mode?: SupportedMode;
+  densityMode?: keyof typeof density;
+}
+
+const getDensityDataGridMode = (densityMode: keyof typeof density): "compact" | "standard" =>
+  densityMode === "compact" ? "compact" : "standard";
+
+const getThemeOptions = (mode: SupportedMode, densityMode: keyof typeof density): ThemeOptions => {
+  const isDark = mode === "dark";
+  const palette = isDark ? darkPalette : lightPalette;
+  const roleSet = semanticRoles[mode];
+  const statusSet = medicalStatusTokens[mode];
+  const densitySet = density[densityMode];
+  const themeShadows = isDark ? darkShadows : shadows;
+  const focusShadow = isDark ? focusRing.darkShadow : focusRing.lightShadow;
+
+  return {
+    palette,
+    typography: typographyOptions,
+    shadows: themeShadows as unknown as Theme["shadows"],
+    shape: {
+      borderRadius: borderRadius.md,
     },
-    easing: {
-      easeInOut: easing.easeInOut,
-      easeOut: easing.easeOut,
-      easeIn: easing.easeIn,
-      sharp: easing.sharp,
+    spacing: (factor: number) => `${factor * 4}px`,
+    zIndex: {
+      mobileStepper: zIndex.dropdown,
+      speedDial: zIndex.dropdown,
+      appBar: zIndex.fixed,
+      drawer: zIndex.sticky,
+      modal: zIndex.modal,
+      snackbar: zIndex.toast,
+      tooltip: zIndex.tooltip,
     },
-  },
-  components: {
-    // Button customizations
-    MuiButton: {
-      styleOverrides: {
-        root: {
-          textTransform: 'none',
-          fontWeight: 500,
-          borderRadius: borderRadius.sm,
-          transition: transitions.interactive,
-        },
-        contained: {
-          boxShadow: shadows[1],
-          '&:hover': {
-            boxShadow: shadows[2],
+    transitions: {
+      duration: {
+        shortest: duration.fast,
+        shorter: duration.micro,
+        short: duration.standard,
+        standard: duration.standard,
+        complex: duration.slow,
+        enteringScreen: duration.slow,
+        leavingScreen: duration.standard,
+      },
+      easing: {
+        easeInOut: easing.easeInOut,
+        easeOut: easing.easeOut,
+        easeIn: easing.easeIn,
+        sharp: easing.sharp,
+      },
+    },
+    components: {
+      MuiCssBaseline: {
+        styleOverrides: {
+          body: {
+            backgroundColor: roleSet.surface.canvas,
+            color: roleSet.text.primary,
+          },
+          "h1, h2, h3, h4, h5, h6": {
+            fontFamily: fontFamily.heading,
+          },
+          ".clinical-text, .MuiDataGrid-root, .MuiTableCell-root": {
+            fontFamily: fontFamily.clinical,
           },
         },
       },
-    },
-    // Card customizations
-    MuiCard: {
-      styleOverrides: {
-        root: {
-          borderRadius: borderRadius.md,
-          boxShadow: shadows[2],
-          transition: transitions.shadow.standard,
-          '&:hover': {
-            boxShadow: shadows[3],
-          },
+
+      // Button contract
+      MuiButton: {
+        defaultProps: {
+          disableElevation: true,
         },
-      },
-    },
-    // Input customizations
-    MuiTextField: {
-      styleOverrides: {
-        root: {
-          '& .MuiOutlinedInput-root': {
+        styleOverrides: {
+          root: {
+            minHeight: densitySet.buttonHeight,
             borderRadius: borderRadius.sm,
+            textTransform: "none",
+            fontWeight: 600,
+            transition: transitions.interactive,
+            "&:focus-visible": {
+              outline: `${focusRing.width}px solid transparent`,
+              boxShadow: focusShadow,
+            },
+          },
+          contained: {
+            backgroundColor: roleSet.accent.main,
+            color: roleSet.text.inverse,
+            "&:hover": {
+              backgroundColor: roleSet.accent.strong,
+              boxShadow: componentShadows.cardHover,
+            },
           },
         },
       },
-    },
-    // Dialog customizations
-    MuiDialog: {
-      styleOverrides: {
-        paper: {
-          borderRadius: borderRadius.lg,
-          boxShadow: shadows[4],
-        },
-      },
-    },
-    // Alert customizations for clinical use
-    MuiAlert: {
-      styleOverrides: {
-        root: {
-          borderRadius: borderRadius.sm,
-          fontWeight: 500,
-        },
-        standardError: {
-          backgroundColor: severity.major.bgLight,
-          color: severity.major.dark,
-        },
-        standardWarning: {
-          backgroundColor: severity.moderate.bgLight,
-          color: severity.moderate.dark,
-        },
-        standardInfo: {
-          backgroundColor: severity.minor.bgLight,
-          color: severity.minor.dark,
-        },
-        standardSuccess: {
-          backgroundColor: severity.none.bgLight,
-          color: severity.none.dark,
-        },
-      },
-    },
-    // Chip customizations
-    MuiChip: {
-      styleOverrides: {
-        root: {
-          borderRadius: borderRadius.xs,
-          fontWeight: 500,
-        },
-      },
-    },
-    // Tooltip customizations
-    MuiTooltip: {
-      styleOverrides: {
-        tooltip: {
-          borderRadius: borderRadius.xs,
-          fontSize: '0.75rem',
-        },
-      },
-    },
-    // Snackbar customizations
-    MuiSnackbar: {
-      styleOverrides: {
-        root: {
-          '& .MuiSnackbarContent-root': {
+
+      // Card contract
+      MuiCard: {
+        styleOverrides: {
+          root: {
             borderRadius: borderRadius.md,
-            boxShadow: componentShadows.snackbar,
+            border: `1px solid ${roleSet.border.subtle}`,
+            boxShadow: componentShadows.card,
+            transition: transitions.shadow.standard,
+            "&:hover": {
+              boxShadow: componentShadows.cardHover,
+            },
+          },
+        },
+      },
+
+      // DataGrid contract
+      MuiDataGrid: {
+        defaultProps: {
+          density: getDensityDataGridMode(densityMode),
+          rowHeight: densitySet.tableRowHeight,
+          columnHeaderHeight: densitySet.tableHeaderHeight,
+        },
+        styleOverrides: {
+          root: {
+            borderRadius: borderRadius.md,
+            borderColor: roleSet.border.default,
+            backgroundColor: roleSet.surface.panel,
+            color: roleSet.text.primary,
+            fontFamily: fontFamily.clinical,
+          },
+          columnHeaders: {
+            borderBottom: `1px solid ${roleSet.border.default}`,
+            backgroundColor: roleSet.surface.subdued,
+            fontFamily: fontFamily.heading,
+            fontWeight: 700,
+          },
+          cell: {
+            borderBottom: `1px solid ${roleSet.border.subtle}`,
+            fontFamily: fontFamily.clinical,
+          },
+          row: {
+            "&:hover": {
+              backgroundColor: roleSet.muted.surface,
+            },
+            "&.Mui-selected": {
+              backgroundColor: roleSet.accent.subtle,
+            },
+          },
+        },
+      },
+
+      // Chip contract
+      MuiChip: {
+        styleOverrides: {
+          root: {
+            height: densitySet.chipHeight,
+            borderRadius: borderRadius.full,
+            fontWeight: 600,
+            borderColor: roleSet.border.default,
+          },
+        },
+      },
+
+      // Tabs contract
+      MuiTabs: {
+        styleOverrides: {
+          root: {
+            minHeight: densitySet.tabMinHeight,
+          },
+          indicator: {
+            height: 3,
+            borderRadius: borderRadius.full,
+            backgroundColor: roleSet.accent.main,
+          },
+        },
+      },
+      MuiTab: {
+        styleOverrides: {
+          root: {
+            minHeight: densitySet.tabMinHeight,
+            fontFamily: fontFamily.heading,
+            textTransform: "none",
+            fontWeight: 600,
+            color: roleSet.text.secondary,
+            "&.Mui-selected": {
+              color: roleSet.text.primary,
+            },
+          },
+        },
+      },
+
+      // Alert contract
+      MuiAlert: {
+        styleOverrides: {
+          root: {
+            borderRadius: borderRadius.sm,
+            border: `1px solid ${roleSet.border.subtle}`,
+            fontFamily: fontFamily.clinical,
+            fontWeight: 500,
+          },
+          standardError: {
+            backgroundColor: statusSet.critical.surface,
+            color: statusSet.critical.foreground,
+            boxShadow: clinicalShadows.critical,
+          },
+          standardWarning: {
+            backgroundColor: statusSet.warning.surface,
+            color: statusSet.warning.foreground,
+            boxShadow: clinicalShadows.warning,
+          },
+          standardInfo: {
+            backgroundColor: statusSet.info.surface,
+            color: statusSet.info.foreground,
+            boxShadow: clinicalShadows.info,
+          },
+          standardSuccess: {
+            backgroundColor: statusSet.success.surface,
+            color: statusSet.success.foreground,
+            boxShadow: clinicalShadows.success,
+          },
+        },
+      },
+
+      // Tooltip contract
+      MuiTooltip: {
+        styleOverrides: {
+          tooltip: {
+            borderRadius: borderRadius.xs,
+            fontSize: "0.75rem",
+            backgroundColor: roleSet.text.primary,
+            color: roleSet.text.inverse,
+            fontFamily: fontFamily.clinical,
+          },
+        },
+      },
+
+      // Dialog contract
+      MuiDialog: {
+        styleOverrides: {
+          paper: {
+            borderRadius: borderRadius.lg,
+            boxShadow: componentShadows.dialog,
+            padding: densitySet.dialogPadding,
+            border: `1px solid ${roleSet.border.subtle}`,
+          },
+        },
+      },
+
+      // Drawer contract
+      MuiDrawer: {
+        styleOverrides: {
+          paper: {
+            borderRight: `1px solid ${roleSet.border.subtle}`,
+            boxShadow: componentShadows.drawer,
+            backgroundColor: roleSet.surface.panel,
+          },
+        },
+      },
+
+      // AppBar contract
+      MuiAppBar: {
+        styleOverrides: {
+          root: {
+            backgroundColor: roleSet.surface.panel,
+            color: roleSet.text.primary,
+            borderBottom: `1px solid ${roleSet.border.subtle}`,
+            boxShadow: componentShadows.appBar,
+          },
+        },
+      },
+
+      // Form control contract
+      MuiTextField: {
+        styleOverrides: {
+          root: {
+            "& .MuiOutlinedInput-root": {
+              minHeight: densitySet.inputHeight,
+            },
+          },
+        },
+      },
+      MuiFormControl: {
+        styleOverrides: {
+          root: {
+            "& .MuiOutlinedInput-root": {
+              borderRadius: borderRadius.sm,
+              backgroundColor: roleSet.surface.panel,
+              transition: transitions.interactive,
+              "&:hover .MuiOutlinedInput-notchedOutline": {
+                borderColor: roleSet.border.strong,
+              },
+              "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+                borderColor: roleSet.border.focus,
+                borderWidth: "2px",
+              },
+              "&.Mui-focused": {
+                boxShadow: focusShadow,
+              },
+            },
+          },
+        },
+      },
+      MuiOutlinedInput: {
+        styleOverrides: {
+          root: {
+            minHeight: densitySet.inputHeight,
+            "& .MuiOutlinedInput-notchedOutline": {
+              borderColor: roleSet.border.default,
+            },
+          },
+          input: {
+            fontFamily: fontFamily.clinical,
+          },
+        },
+      },
+      MuiFormLabel: {
+        styleOverrides: {
+          root: {
+            fontFamily: fontFamily.heading,
+            fontWeight: 600,
+          },
+        },
+      },
+      MuiInputLabel: {
+        styleOverrides: {
+          root: {
+            fontFamily: fontFamily.heading,
+            fontWeight: 600,
+          },
+        },
+      },
+      MuiFormHelperText: {
+        styleOverrides: {
+          root: {
+            fontFamily: fontFamily.clinical,
+          },
+        },
+      },
+      MuiSelect: {
+        styleOverrides: {
+          select: {
+            fontFamily: fontFamily.clinical,
+          },
+        },
+      },
+      MuiCheckbox: {
+        styleOverrides: {
+          root: {
+            color: roleSet.border.strong,
+            "&.Mui-checked": {
+              color: roleSet.accent.main,
+            },
+          },
+        },
+      },
+      MuiRadio: {
+        styleOverrides: {
+          root: {
+            color: roleSet.border.strong,
+            "&.Mui-checked": {
+              color: roleSet.accent.main,
+            },
+          },
+        },
+      },
+
+      MuiSnackbar: {
+        styleOverrides: {
+          root: {
+            "& .MuiSnackbarContent-root": {
+              borderRadius: borderRadius.md,
+              boxShadow: componentShadows.snackbar,
+            },
           },
         },
       },
     },
-  },
+  };
 };
 
-/**
- * Theme options for dark mode.
- */
-const darkThemeOptions: ThemeOptions = {
-  ...lightThemeOptions,
-  palette: darkPalette,
-  shadows: darkShadows as unknown as Theme['shadows'],
+const attachCDSSMetadata = (theme: Theme, mode: SupportedMode, densityMode: keyof typeof density): CDSSTheme => {
+  const themeWithMeta = theme as CDSSTheme;
+  themeWithMeta.cdss = {
+    severity,
+    clinical,
+    roles: semanticRoles[mode],
+    medicalStatus: medicalStatusTokens[mode],
+    densityMode,
+    density: density[densityMode],
+    focusRing: {
+      ...focusRing,
+      activeShadow: mode === "dark" ? focusRing.darkShadow : focusRing.lightShadow,
+      activeColor: mode === "dark" ? focusRing.darkColor : focusRing.lightColor,
+    },
+    motion: {
+      duration,
+      easing,
+      transitions,
+    },
+    shadows: {
+      clinical: clinicalShadows,
+      components: componentShadows,
+    },
+  };
+  return themeWithMeta;
 };
 
-/**
- * Create the light theme.
- */
-export const lightTheme = createTheme(lightThemeOptions);
-
-/**
- * Create the dark theme.
- */
-export const darkTheme = createTheme(darkThemeOptions);
-
-// ============================================================================
-// THEME UTILITIES
-// ============================================================================
-
-/**
- * Get theme by mode.
- * @param mode - 'light' or 'dark'
- * @returns The corresponding MUI theme
- */
-export function getTheme(mode: 'light' | 'dark'): Theme {
-  return mode === 'dark' ? darkTheme : lightTheme;
+export function createCDSSTheme(options: CreateCDSSThemeOptions = {}): CDSSTheme {
+  const mode = options.mode ?? "light";
+  const densityMode = options.densityMode ?? "comfortable";
+  const baseTheme = createTheme(getThemeOptions(mode, densityMode));
+  return attachCDSSMetadata(baseTheme, mode, densityMode);
 }
 
 /**
- * Get severity color configuration.
- * @param level - Severity level ('major' | 'moderate' | 'minor' | 'none')
- * @returns Severity color configuration
+ * Default comfortable themes used by the application shell.
  */
+export const lightTheme = createCDSSTheme({ mode: "light", densityMode: "comfortable" });
+export const darkTheme = createCDSSTheme({ mode: "dark", densityMode: "comfortable" });
+
+/**
+ * Optional compact variants for dense clinical tables/workflows.
+ */
+export const compactLightTheme = createCDSSTheme({ mode: "light", densityMode: "compact" });
+export const compactDarkTheme = createCDSSTheme({ mode: "dark", densityMode: "compact" });
+
+export function getTheme(mode: SupportedMode, densityMode: keyof typeof density = "comfortable"): CDSSTheme {
+  if (mode === "dark" && densityMode === "compact") return compactDarkTheme;
+  if (mode === "dark") return darkTheme;
+  if (densityMode === "compact") return compactLightTheme;
+  return lightTheme;
+}
+
 export function getSeverityColor(level: keyof typeof severity) {
   return severity[level];
 }
 
-/**
- * Get clinical status color.
- * @param category - Clinical category (e.g., 'patientStatus', 'labStatus')
- * @param status - Status key within the category
- * @returns The color hex value
- */
-export function getClinicalColor<K extends keyof typeof clinical>(
-  category: K,
-  status: keyof typeof clinical[K]
-): string {
+export function getClinicalColor<K extends keyof typeof clinical>(category: K, status: keyof typeof clinical[K]): string {
   return clinical[category][status] as string;
 }
 
@@ -357,37 +576,65 @@ export function getClinicalColor<K extends keyof typeof clinical>(
 // CSS CUSTOM PROPERTIES
 // ============================================================================
 
+const setCssVars = (root: HTMLElement, object: Record<string, unknown>, path: string[] = []): void => {
+  Object.entries(object).forEach(([key, value]) => {
+    const nextPath = [...path, key];
+    if (typeof value === "string" || typeof value === "number") {
+      root.style.setProperty(`--${nextPath.join("-")}`, String(value));
+    } else if (value && typeof value === "object") {
+      setCssVars(root, value as Record<string, unknown>, nextPath);
+    }
+  });
+};
+
 /**
- * Inject CSS custom properties into the document root.
- * Call this once at app initialization.
+ * Injects CSS custom properties for the active mode and density.
  */
-export function injectCssCustomProperties(theme: Theme): void {
+export function injectCssCustomProperties(theme: Theme, densityMode: keyof typeof density = "comfortable"): void {
   const root = document.documentElement;
-  
-  // Primary colors
-  root.style.setProperty('--cdss-primary-main', theme.palette.primary.main);
-  root.style.setProperty('--cdss-primary-light', theme.palette.primary.light ?? '');
-  root.style.setProperty('--cdss-primary-dark', theme.palette.primary.dark ?? '');
-  
-  // Background colors
-  root.style.setProperty('--cdss-background-default', theme.palette.background.default);
-  root.style.setProperty('--cdss-background-paper', theme.palette.background.paper);
-  
-  // Text colors
-  root.style.setProperty('--cdss-text-primary', theme.palette.text.primary);
-  root.style.setProperty('--cdss-text-secondary', theme.palette.text.secondary);
-  
-  // Severity colors (ALWAYS semantically stable)
-  root.style.setProperty('--cdss-severity-major', severity.major.main);
-  root.style.setProperty('--cdss-severity-moderate', severity.moderate.main);
-  root.style.setProperty('--cdss-severity-minor', severity.minor.main);
-  root.style.setProperty('--cdss-severity-none', severity.none.main);
-  
-  // Semantic colors
-  root.style.setProperty('--cdss-success', semantic.success.main);
-  root.style.setProperty('--cdss-info', semantic.info.main);
-  root.style.setProperty('--cdss-warning', semantic.warning.main);
-  root.style.setProperty('--cdss-error', semantic.error.main);
+  const mode: SupportedMode = theme.palette.mode === "dark" ? "dark" : "light";
+  const roleSet = semanticRoles[mode];
+  const statusSet = medicalStatusTokens[mode];
+  const densitySet = density[densityMode];
+
+  root.dataset.themeMode = mode;
+  root.dataset.densityMode = densityMode;
+
+  // Typography
+  root.style.setProperty("--cdss-font-heading", fontFamily.heading);
+  root.style.setProperty("--cdss-font-clinical", fontFamily.clinical);
+
+  // Core palette compatibility variables
+  root.style.setProperty("--cdss-primary-main", theme.palette.primary.main);
+  root.style.setProperty("--cdss-primary-light", theme.palette.primary.light ?? "");
+  root.style.setProperty("--cdss-primary-dark", theme.palette.primary.dark ?? "");
+  root.style.setProperty("--cdss-background-default", theme.palette.background.default);
+  root.style.setProperty("--cdss-background-paper", theme.palette.background.paper);
+  root.style.setProperty("--cdss-text-primary", theme.palette.text.primary);
+  root.style.setProperty("--cdss-text-secondary", theme.palette.text.secondary);
+  root.style.setProperty("--cdss-severity-major", severity.major.main);
+  root.style.setProperty("--cdss-severity-moderate", severity.moderate.main);
+  root.style.setProperty("--cdss-severity-minor", severity.minor.main);
+  root.style.setProperty("--cdss-severity-none", severity.none.main);
+  root.style.setProperty("--cdss-success", semantic.success.main);
+  root.style.setProperty("--cdss-info", semantic.info.main);
+  root.style.setProperty("--cdss-warning", semantic.warning.main);
+  root.style.setProperty("--cdss-error", semantic.error.main);
+
+  // Semantic roles and medical statuses
+  setCssVars(root, roleSet as unknown as Record<string, unknown>, ["cdss", "role"]);
+  setCssVars(root, statusSet as unknown as Record<string, unknown>, ["cdss", "status"]);
+  setCssVars(root, densitySet as unknown as Record<string, unknown>, ["cdss", "density"]);
+
+  // Focus + motion
+  root.style.setProperty("--cdss-focus-ring-width", String(focusRing.width));
+  root.style.setProperty("--cdss-focus-ring-offset", String(focusRing.offset));
+  root.style.setProperty("--cdss-focus-ring-color", mode === "dark" ? focusRing.darkColor : focusRing.lightColor);
+  root.style.setProperty("--cdss-focus-ring-shadow", mode === "dark" ? focusRing.darkShadow : focusRing.lightShadow);
+  root.style.setProperty("--cdss-motion-fast", `${duration.fast}ms`);
+  root.style.setProperty("--cdss-motion-micro", `${duration.micro}ms`);
+  root.style.setProperty("--cdss-motion-standard", `${duration.standard}ms`);
+  root.style.setProperty("--cdss-motion-slow", `${duration.slow}ms`);
 }
 
 // ============================================================================
@@ -396,22 +643,25 @@ export function injectCssCustomProperties(theme: Theme): void {
 
 export type { Theme, ThemeOptions };
 
-/**
- * Extended theme with CDSS-specific properties.
- */
 export interface CDSSTheme extends Theme {
   cdss: {
     severity: typeof severity;
     clinical: typeof clinical;
+    roles: (typeof semanticRoles)[SupportedMode];
+    medicalStatus: (typeof medicalStatusTokens)[SupportedMode];
+    densityMode: keyof typeof density;
+    density: (typeof density)[keyof typeof density];
+    focusRing: typeof focusRing & { activeShadow: string; activeColor: string };
+    motion: {
+      duration: typeof duration;
+      easing: typeof easing;
+      transitions: typeof transitions;
+    };
     shadows: {
       clinical: typeof clinicalShadows;
       components: typeof componentShadows;
     };
   };
 }
-
-// ============================================================================
-// DEFAULT EXPORT
-// ============================================================================
 
 export default lightTheme;

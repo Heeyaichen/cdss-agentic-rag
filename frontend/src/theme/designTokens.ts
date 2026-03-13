@@ -161,7 +161,7 @@ export const letterSpacing = {
  * Complete typography configuration.
  */
 export const typography = {
-  fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+  fontFamily: "\"IBM Plex Sans\", \"Segoe UI\", \"Helvetica Neue\", Arial, sans-serif",
   fontSize,
   fontWeight,
   lineHeight,
@@ -412,6 +412,57 @@ export const opacity = {
 export type Opacity = (typeof opacity)[keyof typeof opacity];
 
 // ============================================================================
+// FOCUS RING TOKENS
+// ============================================================================
+
+/**
+ * Focus ring tokens for keyboard accessibility and high-clarity focus states.
+ */
+export const focusRing = {
+  width: 2,
+  offset: 2,
+  lightColor: "rgba(13, 115, 119, 0.32)",
+  darkColor: "rgba(102, 194, 195, 0.4)",
+  lightShadow: "0 0 0 3px rgba(13, 115, 119, 0.22)",
+  darkShadow: "0 0 0 3px rgba(102, 194, 195, 0.32)",
+} as const;
+
+// ============================================================================
+// DENSITY MODES
+// ============================================================================
+
+/**
+ * Density modes for compact clinical data views vs. comfortable general pages.
+ */
+export const density = {
+  compact: {
+    buttonHeight: 32,
+    inputHeight: 34,
+    chipHeight: 22,
+    tableRowHeight: 36,
+    tableHeaderHeight: 40,
+    tabMinHeight: 34,
+    cardPadding: 12,
+    dialogPadding: 16,
+    drawerItemHeight: 40,
+  },
+  comfortable: {
+    buttonHeight: 40,
+    inputHeight: 40,
+    chipHeight: 28,
+    tableRowHeight: 48,
+    tableHeaderHeight: 52,
+    tabMinHeight: 40,
+    cardPadding: 16,
+    dialogPadding: 24,
+    drawerItemHeight: 48,
+  },
+} as const;
+
+export type DensityMode = keyof typeof density;
+export type DensityTokens = (typeof density)[DensityMode];
+
+// ============================================================================
 // COMPLETE TOKEN EXPORT
 // ============================================================================
 
@@ -429,6 +480,8 @@ export const designTokens = {
   transitions,
   componentSize,
   opacity,
+  focusRing,
+  density,
 } as const;
 
 export type DesignTokens = typeof designTokens;

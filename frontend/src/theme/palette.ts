@@ -191,6 +191,189 @@ export const semantic = {
 } as const;
 
 // ============================================================================
+// SEMANTIC ROLE TOKENS
+// ============================================================================
+
+/**
+ * Semantic role tokens for UI surfaces, borders, text, and stateful accents.
+ * These are mode-aware and mapped to CSS variables at runtime.
+ */
+export const semanticRoles = {
+  light: {
+    surface: {
+      canvas: "#F8FAFC",
+      panel: "#FFFFFF",
+      raised: "#FFFFFF",
+      subdued: "#F3F4F6",
+    },
+    border: {
+      subtle: "#E5E7EB",
+      default: "#D1D5DB",
+      strong: "#9CA3AF",
+      focus: primary.main,
+    },
+    text: {
+      primary: "#111827",
+      secondary: "#4B5563",
+      muted: "#6B7280",
+      inverse: "#FFFFFF",
+    },
+    accent: {
+      main: primary.main,
+      strong: primary.dark,
+      subtle: alpha(primary.main, 0.12),
+    },
+    success: {
+      main: semantic.success.main,
+      foreground: semantic.success.dark,
+      surface: semantic.success.bgLight,
+    },
+    warning: {
+      main: semantic.warning.main,
+      foreground: semantic.warning.dark,
+      surface: semantic.warning.bgLight,
+    },
+    critical: {
+      main: semantic.error.main,
+      foreground: semantic.error.dark,
+      surface: semantic.error.bgLight,
+    },
+    info: {
+      main: semantic.info.main,
+      foreground: semantic.info.dark,
+      surface: semantic.info.bgLight,
+    },
+    muted: {
+      main: "#6B7280",
+      foreground: "#4B5563",
+      surface: "#F3F4F6",
+    },
+  },
+  dark: {
+    surface: {
+      canvas: "#0B1220",
+      panel: "#111827",
+      raised: "#1F2937",
+      subdued: "#0F172A",
+    },
+    border: {
+      subtle: alpha("#F8FAFC", 0.12),
+      default: alpha("#F8FAFC", 0.2),
+      strong: alpha("#F8FAFC", 0.35),
+      focus: "#66C2C3",
+    },
+    text: {
+      primary: "#F9FAFB",
+      secondary: "#D1D5DB",
+      muted: "#9CA3AF",
+      inverse: "#0B1220",
+    },
+    accent: {
+      main: "#33ADAE",
+      strong: "#66C2C3",
+      subtle: alpha("#33ADAE", 0.2),
+    },
+    success: {
+      main: "#22C55E",
+      foreground: "#4ADE80",
+      surface: alpha("#22C55E", 0.18),
+    },
+    warning: {
+      main: "#F59E0B",
+      foreground: "#FBBF24",
+      surface: alpha("#F59E0B", 0.2),
+    },
+    critical: {
+      main: "#EF4444",
+      foreground: "#F87171",
+      surface: alpha("#EF4444", 0.2),
+    },
+    info: {
+      main: "#38BDF8",
+      foreground: "#7DD3FC",
+      surface: alpha("#38BDF8", 0.18),
+    },
+    muted: {
+      main: "#9CA3AF",
+      foreground: "#D1D5DB",
+      surface: alpha("#9CA3AF", 0.14),
+    },
+  },
+} as const;
+
+// ============================================================================
+// MEDICAL STATUS TOKENS
+// ============================================================================
+
+/**
+ * Medical status tokens used for contraindication/risk/monitoring/validated states.
+ */
+export const medicalStatusTokens = {
+  light: {
+    critical: {
+      label: "major contraindication",
+      main: severity.major.main,
+      border: severity.major.main,
+      foreground: severity.major.dark,
+      surface: severity.major.bgLight,
+    },
+    warning: {
+      label: "moderate risk",
+      main: severity.moderate.main,
+      border: severity.moderate.main,
+      foreground: severity.moderate.dark,
+      surface: severity.moderate.bgLight,
+    },
+    info: {
+      label: "minor / monitor",
+      main: severity.minor.main,
+      border: severity.minor.main,
+      foreground: severity.minor.dark,
+      surface: severity.minor.bgLight,
+    },
+    success: {
+      label: "validated / healthy",
+      main: severity.none.main,
+      border: severity.none.main,
+      foreground: severity.none.dark,
+      surface: severity.none.bgLight,
+    },
+  },
+  dark: {
+    critical: {
+      label: "major contraindication",
+      main: "#EF4444",
+      border: "#F87171",
+      foreground: "#FCA5A5",
+      surface: alpha("#EF4444", 0.2),
+    },
+    warning: {
+      label: "moderate risk",
+      main: "#F59E0B",
+      border: "#FBBF24",
+      foreground: "#FCD34D",
+      surface: alpha("#F59E0B", 0.2),
+    },
+    info: {
+      label: "minor / monitor",
+      main: "#38BDF8",
+      border: "#7DD3FC",
+      foreground: "#BAE6FD",
+      surface: alpha("#38BDF8", 0.18),
+    },
+    success: {
+      label: "validated / healthy",
+      main: "#22C55E",
+      border: "#4ADE80",
+      foreground: "#86EFAC",
+      surface: alpha("#22C55E", 0.2),
+    },
+  },
+} as const;
+
+export type MedicalStatus = keyof typeof medicalStatusTokens.light;
+
+// ============================================================================
 // NEUTRAL / GRAY SCALE
 // ============================================================================
 

@@ -7,6 +7,10 @@ export default {
   important: '#root',
   theme: {
     extend: {
+      fontFamily: {
+        heading: ["Manrope", "Segoe UI", "sans-serif"],
+        clinical: ["IBM Plex Sans", "Segoe UI", "sans-serif"],
+      },
       colors: {
         primary: {
           50: '#e3f2fd',
