@@ -354,7 +354,7 @@ class TestEndToEnd:
             task = AgentTask(
                 from_agent="orchestrator",
                 to_agent=name,
-                type="task_request",
+                message_type="task_request",
                 payload={"query": query.text, "patient_id": query.patient_id},
                 session_id=query.session_id or "default",
                 trace_id="trace-e2e",

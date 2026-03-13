@@ -98,44 +98,44 @@ class TestMedicalCondition:
     def test_create_valid_condition(self):
         condition = MedicalCondition(
             code="E11.9",
-            system="ICD-10",
+            coding_system="ICD-10",
             display="Type 2 diabetes mellitus without complications",
             onset_date=date(2019, 3, 15),
             status="active",
         )
         assert condition.code == "E11.9"
-        assert condition.system == "ICD-10"
+        assert condition.coding_system == "ICD-10"
         assert condition.status == "active"
 
     def test_condition_snomed_ct_system(self):
         condition = MedicalCondition(
             code="44054006",
-            system="SNOMED-CT",
+            coding_system="SNOMED-CT",
             display="Type 2 diabetes mellitus",
         )
-        assert condition.system == "SNOMED-CT"
+        assert condition.coding_system == "SNOMED-CT"
 
     def test_condition_invalid_coding_system(self):
         with pytest.raises(ValidationError) as exc_info:
             MedicalCondition(
                 code="E11.9",
-                system="INVALID",
+                coding_system="INVALID",
                 display="Diabetes",
             )
         errors = exc_info.value.errors()
-        assert any("system" in str(e.get("loc", "")) for e in errors)
+        assert any("coding_system" in str(e.get("loc", "")) for e in errors)
 
     def test_condition_default_status(self):
-        condition = MedicalCondition(code="J06.9", system="ICD-10", display="URI")
+        condition = MedicalCondition(code="J06.9", coding_system="ICD-10", display="URI")
         assert condition.status == "active"
 
     def test_condition_optional_onset_date(self):
-        condition = MedicalCondition(code="I10", system="ICD-10", display="Hypertension")
+        condition = MedicalCondition(code="I10", coding_system="ICD-10", display="Hypertension")
         assert condition.onset_date is None
 
     def test_condition_json_roundtrip(self):
         condition = MedicalCondition(
-            code="N18.3", system="ICD-10", display="CKD stage 3", onset_date=date(2021, 6, 10)
+            code="N18.3", coding_system="ICD-10", display="CKD stage 3", onset_date=date(2021, 6, 10)
         )
         restored = MedicalCondition.model_validate_json(condition.model_dump_json())
         assert restored.code == condition.code
@@ -187,7 +187,7 @@ class TestAllergy:
             reaction="Anaphylaxis",
             severity="severe",
             code="91936005",
-            system="SNOMED-CT",
+            coding_system="SNOMED-CT",
         )
         assert allergy.substance == "Penicillin"
         assert allergy.severity == "severe"
@@ -204,7 +204,7 @@ class TestAllergy:
     def test_allergy_optional_code(self):
         allergy = Allergy(substance="Sulfa", reaction="Hives", severity="moderate")
         assert allergy.code is None
-        assert allergy.system is None
+        assert allergy.coding_system is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -221,24 +221,34 @@ class TestLabResult:
             display="Hemoglobin A1c",
             value=7.2,
             unit="%",
-            date=date(2025, 11, 1),
+            test_date=date(2025, 11, 1),
             reference_range="4.0-5.6",
         )
         assert lab.code == "4548-4"
         assert lab.value == 7.2
-        assert lab.system == "LOINC"  # default
+        assert lab.coding_system == "LOINC"  # default
 
     def test_lab_result_optional_reference_range(self):
-        lab = LabResult(code="2160-0", display="Creatinine", value=1.8, unit="mg/dL", date=date(2025, 11, 1))
+        lab = LabResult(
+            code="2160-0",
+            display="Creatinine",
+            value=1.8,
+            unit="mg/dL",
+            test_date=date(2025, 11, 1),
+        )
         assert lab.reference_range is None
 
     def test_lab_result_json_roundtrip(self):
         lab = LabResult(
-            code="2160-0", display="Creatinine", value=1.8, unit="mg/dL", date=date(2025, 11, 1)
+            code="2160-0",
+            display="Creatinine",
+            value=1.8,
+            unit="mg/dL",
+            test_date=date(2025, 11, 1),
         )
         restored = LabResult.model_validate_json(lab.model_dump_json())
         assert restored.value == lab.value
-        assert restored.date == lab.date
+        assert restored.test_date == lab.test_date
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -256,7 +266,7 @@ class TestPatientProfile:
         assert len(profile.active_medications) == 2
         assert len(profile.allergies) == 1
         assert len(profile.recent_labs) == 2
-        assert profile.type == "patient_profile"
+        assert profile.doc_type == "patient_profile"
 
     def test_patient_profile_auto_generated_id(self):
         profile = PatientProfile(
@@ -326,12 +336,12 @@ class TestClinicalQuery:
             text="Check drug interactions for metformin and lisinopril",
             intent="drug_check",
             extracted_entities=[
-                ExtractedEntity(type="medication", value="metformin", code="860975"),
-                ExtractedEntity(type="medication", value="lisinopril", code="314076"),
+                ExtractedEntity(entity_type="medication", value="metformin", code="860975"),
+                ExtractedEntity(entity_type="medication", value="lisinopril", code="314076"),
             ],
         )
         assert len(query.extracted_entities) == 2
-        assert query.extracted_entities[0].type == "medication"
+        assert query.extracted_entities[0].entity_type == "medication"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -344,15 +354,15 @@ class TestExtractedEntity:
 
     def test_valid_entity_types(self):
         for entity_type in ("condition", "medication", "lab_test", "procedure", "anatomical_site"):
-            entity = ExtractedEntity(type=entity_type, value="test")
-            assert entity.type == entity_type
+            entity = ExtractedEntity(entity_type=entity_type, value="test")
+            assert entity.entity_type == entity_type
 
     def test_invalid_entity_type(self):
         with pytest.raises(ValidationError):
-            ExtractedEntity(type="invalid_type", value="test")
+            ExtractedEntity(entity_type="invalid_type", value="test")
 
     def test_entity_optional_code(self):
-        entity = ExtractedEntity(type="condition", value="diabetes")
+        entity = ExtractedEntity(entity_type="condition", value="diabetes")
         assert entity.code is None
 
 
@@ -643,7 +653,7 @@ class TestConversationTurn:
         assert turn.session_id == "sess-001"
         assert turn.turn_number == 1
         assert turn.feedback is None
-        assert turn.type == "conversation_turn"
+        assert turn.doc_type == "conversation_turn"
 
     def test_turn_auto_generated_id(
         self,
@@ -694,7 +704,7 @@ class TestAuditLogEntry:
     def test_create_valid_audit_entry(self):
         entry = AuditLogEntry(
             date_partition="2025-12-01",
-            type="patient_data_access",
+            event_type="patient_data_access",
             actor={"clinician_id": "C-001", "role": "physician"},
             action="read_patient_profile",
             resource={"type": "patient_profile", "id": "P-12345"},
@@ -705,14 +715,14 @@ class TestAuditLogEntry:
             phi_fields_sent=["demographics.age", "active_conditions"],
             phi_fields_redacted=["demographics.name"],
         )
-        assert entry.type == "patient_data_access"
+        assert entry.event_type == "patient_data_access"
         assert entry.data_sent_to_llm is True
         assert len(entry.phi_fields_sent) == 2
 
     def test_audit_entry_auto_id(self):
         entry = AuditLogEntry(
             date_partition="2025-12-01",
-            type="llm_interaction",
+            event_type="llm_interaction",
             actor={"system": "cdss"},
             action="generate_response",
             resource={"type": "query", "id": "q-001"},
@@ -726,7 +736,7 @@ class TestAuditLogEntry:
     def test_audit_entry_json_roundtrip(self):
         entry = AuditLogEntry(
             date_partition="2025-12-01",
-            type="agent_execution",
+            event_type="agent_execution",
             actor={"agent": "literature_agent"},
             action="search_pubmed",
             resource={"type": "pubmed", "id": "search-001"},
@@ -736,7 +746,7 @@ class TestAuditLogEntry:
             data_sent_to_llm=False,
         )
         restored = AuditLogEntry.model_validate_json(entry.model_dump_json())
-        assert restored.type == entry.type
+        assert restored.event_type == entry.event_type
         assert restored.action == entry.action
 
 
@@ -775,26 +785,26 @@ class TestAgentTask:
     def test_create_valid_task(self, sample_agent_task):
         assert sample_agent_task.from_agent == "orchestrator"
         assert sample_agent_task.to_agent == "literature_agent"
-        assert sample_agent_task.type == "task_request"
+        assert sample_agent_task.message_type == "task_request"
 
     def test_valid_task_types(self):
         for task_type in ("task_request", "task_response", "error"):
             task = AgentTask(
                 from_agent="a",
                 to_agent="b",
-                type=task_type,
+                message_type=task_type,
                 payload={"key": "value"},
                 session_id="s",
                 trace_id="t",
             )
-            assert task.type == task_type
+            assert task.message_type == task_type
 
     def test_invalid_task_type(self):
         with pytest.raises(ValidationError):
             AgentTask(
                 from_agent="a",
                 to_agent="b",
-                type="invalid",
+                message_type="invalid",
                 payload={},
                 session_id="s",
                 trace_id="t",
@@ -804,7 +814,7 @@ class TestAgentTask:
         task = AgentTask(
             from_agent="a",
             to_agent="b",
-            type="task_request",
+            message_type="task_request",
             payload={},
             session_id="s",
             trace_id="t",
@@ -935,7 +945,7 @@ class TestPatientContext:
         ctx = PatientContext(
             demographics=Demographics(age=62, sex="male", weight_kg=85.0, height_cm=175.0),
             conditions=[
-                MedicalCondition(code="E11.9", system="ICD-10", display="T2DM"),
+                MedicalCondition(code="E11.9", coding_system="ICD-10", display="T2DM"),
             ],
             medications=[
                 Medication(rxcui="860975", name="Metformin 500mg", dose="500 mg", frequency="BID"),

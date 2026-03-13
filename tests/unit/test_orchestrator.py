@@ -99,7 +99,7 @@ class _MockOrchestrator:
                 task = AgentTask(
                     from_agent="orchestrator",
                     to_agent=agent_name,
-                    type="task_request",
+                    message_type="task_request",
                     payload={"query": query.text, "patient_id": query.patient_id},
                     session_id=query.session_id or "default",
                     trace_id="trace-test",
@@ -178,7 +178,7 @@ class _MockOrchestrator:
             task = AgentTask(
                 from_agent="orchestrator",
                 to_agent="guardrails",
-                type="task_request",
+                message_type="task_request",
                 payload={
                     "response_text": response.recommendation,
                     "citations": [c.model_dump() for c in response.citations],

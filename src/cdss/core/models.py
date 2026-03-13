@@ -5,7 +5,7 @@ patient records, clinical queries/responses, agent coordination,
 drug safety, literature evidence, and audit logging.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
@@ -231,7 +231,7 @@ class PatientProfile(BaseModel):
         description="Embedding vector representing the patient profile for similarity search.",
     )
     last_updated: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(timezone.utc),
         description="Timestamp of the last profile update.",
     )
 
@@ -461,7 +461,7 @@ class ConversationTurn(BaseModel):
         ..., ge=1, description="Sequential turn number within the session."
     )
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(timezone.utc),
         description="Timestamp when this turn was processed.",
     )
     clinician_id: str = Field(
@@ -535,7 +535,7 @@ class AuditLogEntry(BaseModel):
         description="Audit event type (e.g., 'patient_data_access', 'llm_interaction', 'agent_execution').",
     )
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(timezone.utc),
         description="UTC timestamp of the audited event.",
     )
     actor: dict[str, str] = Field(

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cdss.core.models import ClinicalQuery, ClinicalResponse, DrugAlert, Citation
 
@@ -28,7 +28,7 @@ from cdss.core.models import ClinicalQuery, ClinicalResponse, DrugAlert, Citatio
 
 
 class QueryRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1)
     patient_id: str | None = None
     session_id: str | None = None
 

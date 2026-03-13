@@ -184,7 +184,7 @@ def mock_cosmos_client() -> AsyncMock:
     client.get_patient_profile.return_value = {
         "id": "prof-001",
         "patient_id": "P-12345",
-        "type": "patient_profile",
+        "doc_type": "patient_profile",
         "demographics": {
             "age": 62,
             "sex": "male",
@@ -195,7 +195,7 @@ def mock_cosmos_client() -> AsyncMock:
         "active_conditions": [
             {
                 "code": "E11.9",
-                "system": "ICD-10",
+                "coding_system": "ICD-10",
                 "display": "Type 2 diabetes mellitus",
                 "status": "active",
             }
@@ -218,11 +218,11 @@ def mock_cosmos_client() -> AsyncMock:
         "recent_labs": [
             {
                 "code": "4548-4",
-                "system": "LOINC",
+                "coding_system": "LOINC",
                 "display": "Hemoglobin A1c",
                 "value": 7.2,
                 "unit": "%",
-                "date": "2025-11-01",
+                "test_date": "2025-11-01",
                 "reference_range": "4.0-5.6",
             }
         ],
@@ -427,7 +427,7 @@ def sample_patient_profile(sample_demographics: Demographics) -> dict:
     return {
         "id": "prof-001",
         "patient_id": "P-12345",
-        "type": "patient_profile",
+        "doc_type": "patient_profile",
         "demographics": {
             "age": 62,
             "sex": "male",
@@ -438,14 +438,14 @@ def sample_patient_profile(sample_demographics: Demographics) -> dict:
         "active_conditions": [
             {
                 "code": "E11.9",
-                "system": "ICD-10",
+                "coding_system": "ICD-10",
                 "display": "Type 2 diabetes mellitus without complications",
                 "onset_date": "2019-03-15",
                 "status": "active",
             },
             {
                 "code": "N18.3",
-                "system": "ICD-10",
+                "coding_system": "ICD-10",
                 "display": "Chronic kidney disease, stage 3",
                 "onset_date": "2021-06-10",
                 "status": "active",
@@ -475,26 +475,26 @@ def sample_patient_profile(sample_demographics: Demographics) -> dict:
                 "reaction": "Anaphylaxis",
                 "severity": "severe",
                 "code": "91936005",
-                "system": "SNOMED-CT",
+                "coding_system": "SNOMED-CT",
             }
         ],
         "recent_labs": [
             {
                 "code": "4548-4",
-                "system": "LOINC",
+                "coding_system": "LOINC",
                 "display": "Hemoglobin A1c",
                 "value": 7.2,
                 "unit": "%",
-                "date": "2025-11-01",
+                "test_date": "2025-11-01",
                 "reference_range": "4.0-5.6",
             },
             {
                 "code": "2160-0",
-                "system": "LOINC",
+                "coding_system": "LOINC",
                 "display": "Creatinine",
                 "value": 1.8,
                 "unit": "mg/dL",
-                "date": "2025-11-01",
+                "test_date": "2025-11-01",
                 "reference_range": "0.7-1.3",
             },
         ],
@@ -510,8 +510,8 @@ def sample_clinical_query() -> ClinicalQuery:
         session_id="sess-abc123",
         intent="treatment",
         extracted_entities=[
-            ExtractedEntity(type="condition", value="type 2 diabetes", code="E11.9"),
-            ExtractedEntity(type="condition", value="CKD stage 3", code="N18.3"),
+            ExtractedEntity(entity_type="condition", value="type 2 diabetes", code="E11.9"),
+            ExtractedEntity(entity_type="condition", value="CKD stage 3", code="N18.3"),
         ],
     )
 
@@ -672,7 +672,7 @@ def sample_agent_task() -> AgentTask:
     return AgentTask(
         from_agent="orchestrator",
         to_agent="literature_agent",
-        type="task_request",
+        message_type="task_request",
         payload={
             "query": "SGLT2 inhibitors for type 2 diabetes with CKD stage 3",
             "patient_id": "P-12345",
