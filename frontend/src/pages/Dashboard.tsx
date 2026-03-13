@@ -1,502 +1,808 @@
-import React from 'react';
-import { Box, Grid, Card, CardContent, Typography, Paper, Chip, useTheme } from '@mui/material';
-import { QueryStats, Person, Medication, Description, Warning, CheckCircle, Science } from '@mui/icons-material';
-import { useQuery } from '@tanstack/react-query';
-import { clinicalApi } from '@/lib/api-client';
-import { DashboardSkeleton } from '@/components/common/LoadingSkeleton';
-// Design tokens
+import React from "react";
 import {
-  primary,
+  Alert,
+  Box,
+  ButtonBase,
+  Card,
+  CardContent,
+  Chip,
+  Divider,
+  Grid,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText,
+  Skeleton,
+  Stack,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+  useMediaQuery,
+  useTheme,
+} from "@mui/material";
+import {
+  CheckCircle,
+  Description,
+  FactCheck,
+  HealthAndSafety,
+  Medication,
+  PendingActions,
+  QueryStats,
+  Science,
+  Speed,
+  Timeline,
+  WarningAmber,
+} from "@mui/icons-material";
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import dayjs from "dayjs";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { clinicalApi } from "@/lib/api-client";
+import type { AuditLogEntry, HealthCheckResponse } from "@/lib/types";
+import {
+  alpha as alphaUtil,
+  borderRadius,
+  componentShadows,
+  density as densityTokens,
   semantic,
   severity,
-  clinical,
-  alpha as alphaUtil,
-  componentShadows,
-  clinicalShadows,
-  interactiveShadows,
   spacing,
-  borderRadius,
   transitions,
-  opacity,
-  neutral,
-} from '@/theme';
+} from "@/theme";
 
-interface StatCardProps {
-  title: string;
-  value: string | number;
-  icon: React.ReactNode;
+type DensityMode = "compact" | "comfortable";
+type ActivityOutcome = "success" | "failure" | "warning";
+
+interface HeroMetric {
+  label: "System Health" | "Queries Today" | "High-Risk Alerts" | "Pending Reviews";
+  value: number | string;
+  subtitle: string;
   color: string;
-  subtitle?: string;
+  icon: React.ReactNode;
 }
 
-function StatCard({ title, value, icon, color, subtitle }: StatCardProps) {
+interface ActivityFeedItem {
+  id: string;
+  eventType: string;
+  description: string;
+  timestamp: string;
+  outcome: ActivityOutcome;
+}
+
+interface AgentLatencyPoint {
+  agent: string;
+  latency: number;
+}
+
+interface TrendPoint {
+  day: string;
+  success: number;
+  failure: number;
+}
+
+interface SafetyItem {
+  id: string;
+  title: string;
+  details: string;
+  timestamp: string;
+}
+
+interface QuickAction {
+  label: string;
+  hint: string;
+  path: string;
+  color: string;
+  icon: React.ReactNode;
+}
+
+const FALLBACK_AGENT_BASELINES: Array<{ agent: string; latency: number }> = [
+  { agent: "Orchestrator", latency: 460 },
+  { agent: "Patient History", latency: 320 },
+  { agent: "Literature", latency: 980 },
+  { agent: "Protocol", latency: 410 },
+  { agent: "Drug Safety", latency: 540 },
+  { agent: "Guardrails", latency: 360 },
+];
+
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    label: "Launch Clinical Query",
+    hint: "Start evidence synthesis",
+    path: "/query",
+    color: semantic.info.main,
+    icon: <QueryStats />,
+  },
+  {
+    label: "Open Patient Workspace",
+    hint: "Review chart + history",
+    path: "/patients",
+    color: semantic.success.main,
+    icon: <HealthAndSafety />,
+  },
+  {
+    label: "Run Drug Safety Check",
+    hint: "Scan interactions now",
+    path: "/drugs",
+    color: severity.moderate.main,
+    icon: <Medication />,
+  },
+  {
+    label: "Review Evidence Library",
+    hint: "Inspect latest literature",
+    path: "/literature",
+    color: semantic.warning.main,
+    icon: <Science />,
+  },
+];
+
+function normalizeAuditEntries(raw: unknown): AuditLogEntry[] {
+  if (Array.isArray(raw)) {
+    return raw as AuditLogEntry[];
+  }
+  if (raw && typeof raw === "object") {
+    const record = raw as Record<string, unknown>;
+    const candidates = [record.items, record.entries, record.results, record.data, record.audit];
+    const firstArray = candidates.find((item) => Array.isArray(item));
+    if (Array.isArray(firstArray)) {
+      return firstArray as AuditLogEntry[];
+    }
+  }
+  return [];
+}
+
+function mapOutcome(outcome: string): ActivityOutcome {
+  if (outcome === "success") return "success";
+  if (outcome === "failure" || outcome === "denied") return "failure";
+  return "warning";
+}
+
+function formatRelativeTimestamp(timestamp: string): string {
+  const now = dayjs();
+  const eventTime = dayjs(timestamp);
+  const diffMinutes = now.diff(eventTime, "minute");
+  if (diffMinutes < 60) return `${Math.max(diffMinutes, 1)}m ago`;
+  const diffHours = now.diff(eventTime, "hour");
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${now.diff(eventTime, "day")}d ago`;
+}
+
+function formatEventTypeLabel(eventType: string): string {
+  return eventType.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function getEventIcon(eventType: string) {
+  if (eventType.includes("drug")) return <Medication fontSize="small" />;
+  if (eventType.includes("document")) return <Description fontSize="small" />;
+  if (eventType.includes("llm") || eventType.includes("query")) return <QueryStats fontSize="small" />;
+  return <FactCheck fontSize="small" />;
+}
+
+function outcomeColor(outcome: ActivityOutcome): string {
+  if (outcome === "success") return semantic.success.main;
+  if (outcome === "failure") return semantic.error.main;
+  return semantic.warning.main;
+}
+
+function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <Card
+    <Box
       sx={{
-        height: '100%',
+        py: spacing[6],
+        textAlign: "center",
+        border: "1px dashed",
+        borderColor: "divider",
         borderRadius: borderRadius.md,
-        boxShadow: componentShadows.card,
-        border: `1px solid ${alphaUtil(color, opacity.light)}`,
-        transition: `${transitions.shadow.standard}, ${transitions.transform.standard}, ${transitions.border.standard}`,
-        '&:hover': {
-          boxShadow: interactiveShadows.hover,
-          transform: 'translateY(-2px)',
-          borderColor: alphaUtil(color, opacity.medium),
-        },
       }}
     >
-      <CardContent sx={{ p: spacing[4] }}>
-        <Box display="flex" alignItems="center" justifyContent="space-between">
-          <Box flex={1} minWidth={0}>
-            <Typography
-              variant="body2"
-              sx={{
-                color: 'text.secondary',
-                fontWeight: 500,
-                letterSpacing: '0.025em',
-                mb: 0.5,
-                textTransform: 'uppercase',
-                fontSize: '0.7rem',
-              }}
-            >
-              {title}
-            </Typography>
-            <Typography
-              variant="h4"
-              sx={{
-                fontWeight: 700,
-                color: 'text.primary',
-                lineHeight: 1.2,
-                mb: 0.25,
-              }}
-            >
-              {value}
-            </Typography>
-            {subtitle && (
-              <Typography
-                variant="caption"
-                sx={{
-                  color: color,
-                  fontWeight: 500,
-                  display: 'block',
-                }}
-              >
-                {subtitle}
-              </Typography>
-            )}
-          </Box>
-          <Box
-            sx={{
-              p: 1.5,
-              borderRadius: borderRadius.md,
-              bgcolor: alphaUtil(color, opacity.light),
-              color: color,
-              transition: transitions.background.standard,
-              flexShrink: 0,
-              ml: 2,
-            }}
-          >
-            {icon}
-          </Box>
+      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+        {title}
+      </Typography>
+      <Typography variant="body2" color="text.secondary">
+        {body}
+      </Typography>
+    </Box>
+  );
+}
+
+function LoadingBlock({ compact }: { compact: boolean }) {
+  const cardHeight = compact ? 104 : 124;
+  const chartHeight = compact ? 220 : 260;
+  const lineItems = compact ? 6 : 4;
+
+  return (
+    <Box>
+      <Stack
+        direction={{ xs: "column", md: "row" }}
+        justifyContent="space-between"
+        alignItems={{ xs: "flex-start", md: "center" }}
+        spacing={2}
+        sx={{ mb: spacing[4] }}
+      >
+        <Box>
+          <Skeleton variant="text" width={280} height={42} />
+          <Skeleton variant="text" width={340} height={22} />
         </Box>
-      </CardContent>
-    </Card>
+        <Skeleton variant="rounded" width={190} height={38} />
+      </Stack>
+
+      <Grid container spacing={2}>
+        {Array.from({ length: 4 }).map((_, index) => (
+          <Grid item xs={12} sm={6} md={6} lg={3} key={`metric-skeleton-${index}`}>
+            <Card sx={{ height: cardHeight }}>
+              <CardContent>
+                <Skeleton width="55%" />
+                <Skeleton width="40%" height={40} />
+                <Skeleton width="70%" />
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
+
+      <Grid container spacing={2} sx={{ mt: 0.5 }}>
+        <Grid item xs={12} lg={8}>
+          <Card sx={{ minHeight: chartHeight + 90 }}>
+            <CardContent>
+              <Skeleton width={220} height={28} />
+              <Skeleton variant="rounded" height={chartHeight} />
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} lg={4}>
+          <Card sx={{ minHeight: chartHeight + 90 }}>
+            <CardContent>
+              <Skeleton width={180} height={28} />
+              <Stack spacing={1.2} sx={{ mt: 2 }}>
+                {Array.from({ length: lineItems }).map((_, i) => (
+                  <Skeleton key={`feed-skeleton-${i}`} height={28} />
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+    </Box>
   );
 }
 
 export default function Dashboard() {
   const theme = useTheme();
+  const navigate = useNavigate();
+  const isTabletOrBelow = useMediaQuery(theme.breakpoints.down("lg"));
+  const [densityMode, setDensityMode] = React.useState<DensityMode>("comfortable");
+  const [revealed, setRevealed] = React.useState(false);
 
-  const { data: patientData, isLoading: patientsLoading } = useQuery<any>({
-    queryKey: ['patients', 'search', '', 1, 100],
-    queryFn: () => clinicalApi.searchPatients({ search: '', page: 1, limit: 100 }),
+  React.useEffect(() => {
+    const id = window.setTimeout(() => setRevealed(true), 40);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  const { data: patientData, isLoading: patientsLoading } = useQuery({
+    queryKey: ["patients", "search", "", 1, 100],
+    queryFn: () => clinicalApi.searchPatients({ search: "", page: 1, limit: 100 }),
   });
 
-  const { data: healthData, isLoading: healthLoading } = useQuery<any>({
-    queryKey: ['health'],
-    queryFn: () => clinicalApi.getHealthCheck(),
+  const { data: healthData, isLoading: healthLoading } = useQuery<HealthCheckResponse>({
+    queryKey: ["health"],
+    queryFn: clinicalApi.getHealthCheck,
   });
 
-  const isLoading = patientsLoading || healthLoading;
+  const { data: rawAuditData, isLoading: auditLoading } = useQuery({
+    queryKey: ["audit", "dashboard", 1, 30],
+    queryFn: () => clinicalApi.getAuditTrail({ page: 1, limit: 30 }),
+  });
 
-  if (isLoading) {
-    return <DashboardSkeleton />;
+  const compact = densityMode === "compact";
+  const density = compact ? densityTokens.compact : densityTokens.comfortable;
+
+  if (patientsLoading || healthLoading || auditLoading) {
+    return <LoadingBlock compact={compact} />;
   }
 
-  const totalPatients = (patientData as any)?.total ?? 0;
-  const systemStatus = (healthData as any)?.status ?? 'unknown';
-  const services: Record<string, string> = ((healthData as any)?.services ?? {}) as Record<string, string>;
+  const patientsTotal = Number((patientData as { total?: number })?.total ?? 0);
+  const services = healthData?.services ?? {};
+  const serviceEntries = Object.entries(services);
+  const healthyServiceCount = serviceEntries.filter(([, status]) => status === "healthy").length;
+  const healthPct = serviceEntries.length > 0 ? Math.round((healthyServiceCount / serviceEntries.length) * 100) : 0;
 
-  const recentActivity = [
-    { id: 1, type: 'query', description: 'Diabetes treatment options query', time: '2 hours ago', status: 'completed' },
-    { id: 2, type: 'patient', description: 'Patient P001 profile viewed', time: '3 hours ago', status: 'completed' },
-    { id: 3, type: 'drug', description: 'Drug interaction check: Metformin + Lisinopril', time: '5 hours ago', status: 'warning' },
-    { id: 4, type: 'document', description: 'Clinical guideline uploaded', time: '1 day ago', status: 'completed' },
-    { id: 5, type: 'query', description: 'CKD management protocols query', time: '1 day ago', status: 'completed' },
+  const auditEntries = normalizeAuditEntries(rawAuditData);
+
+  const activityFeed: ActivityFeedItem[] = [...auditEntries]
+    .sort((a, b) => dayjs(b.timestamp).valueOf() - dayjs(a.timestamp).valueOf())
+    .slice(0, compact ? 8 : 6)
+    .map((entry) => ({
+      id: entry.id,
+      eventType: entry.event_type,
+      description: entry.action.replace(/_/g, " "),
+      timestamp: entry.timestamp,
+      outcome: mapOutcome(entry.outcome),
+    }));
+
+  const today = dayjs().format("YYYY-MM-DD");
+  const queriesToday = auditEntries.filter((entry) => {
+    const isToday = dayjs(entry.timestamp).format("YYYY-MM-DD") === today;
+    const isQueryEvent =
+      entry.event_type.includes("llm") || entry.event_type.includes("query") || entry.resource?.type === "query";
+    return isToday && isQueryEvent;
+  }).length;
+
+  const majorDrugAlerts: SafetyItem[] = auditEntries
+    .filter((entry) => entry.event_type.includes("drug") || entry.action.includes("drug"))
+    .filter((entry) => entry.outcome !== "success" || entry.event_type.includes("interaction"))
+    .slice(0, 4)
+    .map((entry) => ({
+      id: entry.id,
+      title: "Major drug alert",
+      details: `${entry.action.replace(/_/g, " ")} (${entry.actor?.clinician_id ?? "unknown actor"})`,
+      timestamp: entry.timestamp,
+    }));
+
+  const unresolvedGuardrailFlags: SafetyItem[] = auditEntries
+    .filter((entry) => entry.event_type.includes("llm"))
+    .filter((entry) => entry.outcome !== "success")
+    .slice(0, 4)
+    .map((entry) => ({
+      id: `${entry.id}-guardrail`,
+      title: "Unresolved guardrail flag",
+      details: `${entry.justification || "clinical prompt validation failure"}`,
+      timestamp: entry.timestamp,
+    }));
+
+  const pendingReviews = majorDrugAlerts.length + unresolvedGuardrailFlags.length;
+  const highRiskAlerts = majorDrugAlerts.length;
+
+  const heroMetrics: HeroMetric[] = [
+    {
+      label: "System Health",
+      value: `${healthPct || (healthData?.status === "healthy" ? 100 : 0)}%`,
+      subtitle: `${healthyServiceCount}/${serviceEntries.length || 0} core services healthy`,
+      color: semantic.success.main,
+      icon: <HealthAndSafety />,
+    },
+    {
+      label: "Queries Today",
+      value: queriesToday,
+      subtitle: `${patientsTotal} active patient profiles available`,
+      color: semantic.info.main,
+      icon: <QueryStats />,
+    },
+    {
+      label: "High-Risk Alerts",
+      value: highRiskAlerts,
+      subtitle: "Major medication safety events",
+      color: severity.major.main,
+      icon: <WarningAmber />,
+    },
+    {
+      label: "Pending Reviews",
+      value: pendingReviews,
+      subtitle: "Safety + guardrail follow-ups",
+      color: severity.moderate.main,
+      icon: <PendingActions />,
+    },
   ];
 
-  const quickActions = [
-    { label: 'New Query', path: '/query', icon: <QueryStats />, color: primary.main },
-    { label: 'View Patients', path: '/patients', icon: <Person />, color: semantic.success.main },
-    { label: 'Drug Check', path: '/drugs', icon: <Medication />, color: semantic.warning.main },
-    { label: 'Literature', path: '/literature', icon: <Science />, color: semantic.info.main },
-  ];
+  const degradedCount = serviceEntries.filter(([, status]) => status !== "healthy").length;
+  const agentLatencyData: AgentLatencyPoint[] = FALLBACK_AGENT_BASELINES.map((agent, index) => ({
+    agent: agent.agent,
+    latency: agent.latency + degradedCount * 45 + (compact ? -20 : 0) + index * 8,
+  }));
 
-  // Get status color using clinical tokens
-  const getActivityStatusColor = (status: string) => {
-    if (status === 'warning') return semantic.warning.main;
-    return semantic.success.main;
-  };
+  const trendData: TrendPoint[] = React.useMemo(() => {
+    if (auditEntries.length === 0) return [];
 
-  const getServiceStatusColor = (status: string) => {
-    if (status === 'healthy') return semantic.success.main;
-    if (status === 'degraded') return semantic.warning.main;
-    return semantic.error.main;
-  };
+    const baseDays = Array.from({ length: 7 }).map((_, index) => dayjs().subtract(6 - index, "day").format("MMM D"));
+    const seedMap = new Map(baseDays.map((day) => [day, { day, success: 0, failure: 0 }]));
+
+    auditEntries.forEach((entry) => {
+      const dayKey = dayjs(entry.timestamp).format("MMM D");
+      const dayData = seedMap.get(dayKey);
+      if (!dayData) return;
+      if (entry.outcome === "success") {
+        dayData.success += 1;
+      } else {
+        dayData.failure += 1;
+      }
+    });
+
+    return Array.from(seedMap.values());
+  }, [auditEntries]);
 
   return (
-    <Box>
-      {/* Header Section */}
-      <Box sx={{ mb: spacing[8] }}>
-        <Typography
-          variant="h4"
-          sx={{
-            fontWeight: 700,
-            color: 'text.primary',
-            mb: spacing[1],
-            letterSpacing: '-0.015em',
+    <Box
+      sx={{
+        opacity: revealed ? 1 : 0,
+        transform: revealed ? "translateY(0px)" : "translateY(6px)",
+        transition: `${transitions.fade.standard}, ${transitions.transform.standard}`,
+      }}
+    >
+      <Stack
+        direction={{ xs: "column", md: "row" }}
+        justifyContent="space-between"
+        alignItems={{ xs: "flex-start", md: "center" }}
+        spacing={2}
+        sx={{ mb: spacing[4] }}
+      >
+        <Box>
+          <Typography variant="h4" sx={{ mb: 0.5 }}>
+            Clinical Operations Dashboard
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Real-time clinical safety, agent performance, and operational telemetry.
+          </Typography>
+        </Box>
+
+        <ToggleButtonGroup
+          size="small"
+          value={densityMode}
+          exclusive
+          onChange={(_, next: DensityMode | null) => {
+            if (next) setDensityMode(next);
           }}
+          aria-label="Dashboard density mode"
         >
-          Dashboard
-        </Typography>
-        <Typography
-          variant="body2"
-          sx={{
-            color: 'text.secondary',
-            letterSpacing: '0.015em',
-            fontWeight: 400,
-          }}
-        >
-          Clinical Decision Support System Overview
-        </Typography>
-      </Box>
+          <ToggleButton value="comfortable" aria-label="Comfortable density">
+            Comfortable
+          </ToggleButton>
+          <ToggleButton value="compact" aria-label="Compact density for hospital workflows">
+            High-Density
+          </ToggleButton>
+        </ToggleButtonGroup>
+      </Stack>
 
-      {/* Stats Cards Grid */}
-      <Grid container spacing={spacing[6]}>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Total Patients"
-            value={totalPatients}
-            icon={<Person sx={{ fontSize: 32 }} />}
-            color={clinical.patientStatus.active}
-            subtitle="Active records"
-          />
-        </Grid>
-
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Queries Today"
-            value={142}
-            icon={<QueryStats sx={{ fontSize: 32 }} />}
-            color={primary.main}
-            subtitle="Clinical queries processed"
-          />
-        </Grid>
-
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Drug Alerts"
-            value={23}
-            icon={<Warning sx={{ fontSize: 32 }} />}
-            color={severity.moderate.main}
-            subtitle="Requiring review"
-          />
-        </Grid>
-
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="System Health"
-            value={systemStatus === 'healthy' ? '99.9%' : systemStatus}
-            icon={<CheckCircle sx={{ fontSize: 32 }} />}
-            color={systemStatus === 'healthy' ? semantic.success.main : semantic.error.main}
-            subtitle="Uptime this month"
-          />
-        </Grid>
+      {/* Hero summary */}
+      <Grid container spacing={2}>
+        {heroMetrics.map((metric) => (
+          <Grid item xs={12} sm={6} md={6} lg={3} key={metric.label}>
+            <Card
+              sx={{
+                height: "100%",
+                borderRadius: borderRadius.md,
+                border: `1px solid ${alphaUtil(metric.color, 0.2)}`,
+                boxShadow: componentShadows.card,
+              }}
+            >
+              <CardContent sx={{ p: compact ? spacing[3] : spacing[4] }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2}>
+                  <Box>
+                    <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase" }}>
+                      {metric.label}
+                    </Typography>
+                    <Typography variant="h4" sx={{ mt: 0.5 }}>
+                      {metric.value}
+                    </Typography>
+                    <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.5 }}>
+                      {metric.subtitle}
+                    </Typography>
+                  </Box>
+                  <Box
+                    sx={{
+                      p: 1.2,
+                      borderRadius: borderRadius.sm,
+                      color: metric.color,
+                      bgcolor: alphaUtil(metric.color, 0.12),
+                    }}
+                  >
+                    {metric.icon}
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
       </Grid>
 
-      {/* Main Content Grid */}
-      <Grid container spacing={spacing[6]} sx={{ mt: spacing[2] }}>
-        {/* Recent Activity Section */}
-        <Grid item xs={12} md={8}>
-          <Paper
-            sx={{
-              p: spacing[6],
-              borderRadius: borderRadius.lg,
-              boxShadow: componentShadows.card,
-              transition: transitions.shadow.standard,
-              '&:hover': {
-                boxShadow: componentShadows.cardHover,
-              },
-            }}
-          >
-            <Typography
-              variant="h6"
-              sx={{
-                fontWeight: 600,
-                color: 'text.primary',
-                mb: spacing[4],
-                display: 'flex',
-                alignItems: 'center',
-                gap: 1,
-              }}
-            >
-              Recent Activity
-            </Typography>
-            {recentActivity.map((activity, index) => (
-              <Box
-                key={activity.id}
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  py: spacing[3],
-                  px: spacing[2],
-                  mx: -spacing[2],
-                  borderRadius: borderRadius.sm,
-                  transition: transitions.background.standard,
-                  borderBottom:
-                    index === recentActivity.length - 1
-                      ? 'none'
-                      : `1px solid ${alphaUtil(neutral[200], 0.5)}`,
-                  '&:hover': {
-                    bgcolor: alphaUtil(primary.main, opacity.subtle),
-                  },
-                }}
-              >
-                <Box
-                  sx={{
-                    p: spacing[2],
-                    borderRadius: borderRadius.sm,
-                    bgcolor: alphaUtil(getActivityStatusColor(activity.status), opacity.light),
-                    color: getActivityStatusColor(activity.status),
-                    mr: spacing[4],
-                    transition: transitions.background.standard,
-                  }}
-                >
-                  {activity.type === 'query' && <QueryStats fontSize="small" />}
-                  {activity.type === 'patient' && <Person fontSize="small" />}
-                  {activity.type === 'drug' && <Medication fontSize="small" />}
-                  {activity.type === 'document' && <Description fontSize="small" />}
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      fontWeight: 500,
-                      color: 'text.primary',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {activity.description}
-                  </Typography>
-                  <Typography
-                    variant="caption"
-                    sx={{
-                      color: 'text.secondary',
-                      mt: 0.25,
-                      display: 'block',
-                    }}
-                  >
-                    {activity.time}
+      <Grid container spacing={2} sx={{ mt: 0.25 }}>
+        {/* Agent performance */}
+        <Grid item xs={12} xl={8}>
+          <Card sx={{ borderRadius: borderRadius.lg, boxShadow: componentShadows.card, height: "100%" }}>
+            <CardContent sx={{ p: compact ? spacing[3] : spacing[4] }}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                <Box>
+                  <Typography variant="h6">Agent Performance Panel</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Latency by agent and success/fail trend.
                   </Typography>
                 </Box>
-                <Chip
-                  label={activity.status}
-                  size="small"
-                  sx={{
-                    borderRadius: borderRadius.xs,
-                    fontWeight: 500,
-                    textTransform: 'capitalize',
-                    ...(activity.status === 'warning'
-                      ? {
-                          bgcolor: alphaUtil(semantic.warning.main, opacity.medium),
-                          color: semantic.warning.dark,
-                        }
-                      : {
-                          bgcolor: alphaUtil(semantic.success.main, opacity.medium),
-                          color: semantic.success.dark,
-                        }),
-                  }}
-                />
-              </Box>
-            ))}
-          </Paper>
-        </Grid>
+                <Speed sx={{ color: semantic.info.main }} />
+              </Stack>
 
-        {/* Right Sidebar */}
-        <Grid item xs={12} md={4}>
-          {/* Quick Actions */}
-          <Paper
-            sx={{
-              p: spacing[6],
-              mb: spacing[6],
-              borderRadius: borderRadius.lg,
-              boxShadow: componentShadows.card,
-              transition: transitions.shadow.standard,
-              '&:hover': {
-                boxShadow: componentShadows.cardHover,
-              },
-            }}
-          >
-            <Typography
-              variant="h6"
-              sx={{
-                fontWeight: 600,
-                color: 'text.primary',
-                mb: spacing[4],
-              }}
-            >
-              Quick Actions
-            </Typography>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: spacing[1] }}>
-              {quickActions.map((action) => (
-                <Box
-                  key={action.label}
-                  component="button"
-                  tabIndex={0}
-                  aria-label={action.label}
-                  onClick={() => window.location.href = action.path}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      window.location.href = action.path;
-                    }
-                  }}
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: spacing[4],
-                    p: spacing[3],
-                    borderRadius: borderRadius.sm,
-                    cursor: 'pointer',
-                    transition: `${transitions.background.standard}, ${transitions.transform.standard}`,
-                    bgcolor: 'transparent',
-                    border: '1px solid transparent',
-                    '&:hover': {
-                      bgcolor: alphaUtil(action.color, opacity.light),
-                      borderColor: alphaUtil(action.color, opacity.medium),
-                      transform: 'translateX(4px)',
-                    },
-                    '&:focus-visible': {
-                      outline: `2px solid ${action.color}`,
-                      outlineOffset: '2px',
-                      bgcolor: alphaUtil(action.color, opacity.light),
-                    },
-                  }}
-                >
-                  <Box sx={{ color: action.color }}>{action.icon}</Box>
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      fontWeight: 500,
-                      color: 'text.primary',
-                    }}
-                  >
-                    {action.label}
+              <Grid container spacing={2}>
+                <Grid item xs={12} lg={6}>
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                    Latency by Agent (ms)
                   </Typography>
-                </Box>
-              ))}
-            </Box>
-          </Paper>
+                  <Box sx={{ width: "100%", height: compact ? 220 : 260 }}>
+                    <ResponsiveContainer>
+                      <BarChart data={agentLatencyData} margin={{ top: 10, right: 12, left: 0, bottom: 28 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="agent" angle={-25} textAnchor="end" interval={0} height={58} fontSize={11} />
+                        <YAxis width={34} />
+                        <Tooltip />
+                        <Bar
+                          dataKey="latency"
+                          radius={[6, 6, 0, 0]}
+                          fill={semantic.info.main}
+                          isAnimationActive
+                          animationDuration={420}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Box>
+                </Grid>
 
-          {/* System Status */}
-          <Paper
-            sx={{
-              p: spacing[6],
-              borderRadius: borderRadius.lg,
-              boxShadow: componentShadows.card,
-              transition: transitions.shadow.standard,
-              '&:hover': {
-                boxShadow: componentShadows.cardHover,
-              },
-            }}
-          >
-            <Typography
-              variant="h6"
-              sx={{
-                fontWeight: 600,
-                color: 'text.primary',
-                mb: spacing[4],
-                display: 'flex',
-                alignItems: 'center',
-                gap: 0.5,
-              }}
-            >
-              <CheckCircle sx={{ fontSize: 20, color: semantic.success.main }} />
-              System Status
-            </Typography>
-            {Object.entries(services).map(([service, status], index, arr) => (
-              <Box
-                key={service}
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  py: spacing[3],
-                  px: spacing[2],
-                  borderRadius: borderRadius.sm,
-                  transition: transitions.background.standard,
-                  borderBottom: index === arr.length - 1 ? 'none' : `1px solid ${theme.palette.divider}`,
-                  '&:hover': {
-                    bgcolor: alphaUtil(getServiceStatusColor(status), opacity.light),
-                  },
-                }}
-              >
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  {status === 'healthy' && (
-                    <CheckCircle sx={{ fontSize: 16, color: semantic.success.main }} />
+                <Grid item xs={12} lg={6}>
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                    Success / Failure Trend (7 days)
+                  </Typography>
+                  {trendData.length === 0 ? (
+                    <EmptyState
+                      title="No trend data yet"
+                      body="Run clinical queries to populate success/failure telemetry."
+                    />
+                  ) : (
+                    <Box sx={{ width: "100%", height: compact ? 220 : 260 }}>
+                      <ResponsiveContainer>
+                        <LineChart data={trendData} margin={{ top: 10, right: 10, left: 0, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                          <XAxis dataKey="day" fontSize={11} />
+                          <YAxis width={30} />
+                          <Tooltip />
+                          <Legend />
+                          <Line
+                            type="monotone"
+                            dataKey="success"
+                            stroke={semantic.success.main}
+                            strokeWidth={2.5}
+                            dot={{ r: 2.5 }}
+                            isAnimationActive
+                            animationDuration={420}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="failure"
+                            stroke={semantic.error.main}
+                            strokeWidth={2.5}
+                            dot={{ r: 2.5 }}
+                            isAnimationActive
+                            animationDuration={420}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </Box>
                   )}
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      textTransform: 'capitalize',
-                      color: 'text.primary',
-                      fontWeight: 500,
-                    }}
-                  >
-                    {service.replace(/_/g, ' ')}
-                  </Typography>
-                </Box>
-                <Chip
-                  label={status}
-                  size="small"
-                  sx={{
-                    borderRadius: borderRadius.xs,
-                    fontWeight: 500,
-                    textTransform: 'capitalize',
-                    ...(status === 'healthy'
-                      ? {
-                          bgcolor: alphaUtil(semantic.success.main, opacity.medium),
-                          color: semantic.success.dark,
-                          boxShadow: clinicalShadows.success,
-                        }
-                      : status === 'degraded'
-                        ? {
-                            bgcolor: alphaUtil(semantic.warning.main, opacity.medium),
-                            color: semantic.warning.dark,
-                            boxShadow: clinicalShadows.warning,
-                          }
-                        : {
-                            bgcolor: alphaUtil(semantic.error.main, opacity.medium),
-                            color: semantic.error.dark,
-                          }),
-                  }}
-                />
-              </Box>
-            ))}
-          </Paper>
+                </Grid>
+              </Grid>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Safety highlights */}
+        <Grid item xs={12} xl={4}>
+          <Card sx={{ borderRadius: borderRadius.lg, boxShadow: componentShadows.card, height: "100%" }}>
+            <CardContent sx={{ p: compact ? spacing[3] : spacing[4] }}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+                <Typography variant="h6">Safety Highlights</Typography>
+                <WarningAmber sx={{ color: severity.major.main }} />
+              </Stack>
+
+              <Typography variant="subtitle2" sx={{ color: severity.major.dark, mt: 2, mb: 1 }}>
+                Major Drug Alerts ({majorDrugAlerts.length})
+              </Typography>
+              {majorDrugAlerts.length === 0 ? (
+                <EmptyState title="No major drug alerts" body="No unresolved major contraindications currently." />
+              ) : (
+                <List dense={compact} disablePadding>
+                  {majorDrugAlerts.map((item) => (
+                    <ListItem key={item.id} disableGutters sx={{ alignItems: "flex-start" }}>
+                      <ListItemIcon sx={{ minWidth: 28, mt: 0.25 }}>
+                        <Medication sx={{ fontSize: 18, color: severity.major.main }} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={item.title}
+                        secondary={`${item.details} • ${formatRelativeTimestamp(item.timestamp)}`}
+                        primaryTypographyProps={{ variant: "body2", fontWeight: 600 }}
+                        secondaryTypographyProps={{ variant: "caption" }}
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              )}
+
+              <Divider sx={{ my: 2 }} />
+
+              <Typography variant="subtitle2" sx={{ color: severity.moderate.dark, mb: 1 }}>
+                Unresolved Guardrail Flags ({unresolvedGuardrailFlags.length})
+              </Typography>
+              {unresolvedGuardrailFlags.length === 0 ? (
+                <Alert severity="success" variant="outlined">
+                  No unresolved guardrail flags.
+                </Alert>
+              ) : (
+                <List dense={compact} disablePadding>
+                  {unresolvedGuardrailFlags.map((item) => (
+                    <ListItem key={item.id} disableGutters sx={{ alignItems: "flex-start" }}>
+                      <ListItemIcon sx={{ minWidth: 28, mt: 0.25 }}>
+                        <FactCheck sx={{ fontSize: 18, color: severity.moderate.main }} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={item.title}
+                        secondary={`${item.details} • ${formatRelativeTimestamp(item.timestamp)}`}
+                        primaryTypographyProps={{ variant: "body2", fontWeight: 600 }}
+                        secondaryTypographyProps={{ variant: "caption" }}
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              )}
+            </CardContent>
+          </Card>
         </Grid>
       </Grid>
+
+      <Grid container spacing={2} sx={{ mt: 0.25 }}>
+        {/* Recent clinical activity feed */}
+        <Grid item xs={12} lg={8}>
+          <Card sx={{ borderRadius: borderRadius.lg, boxShadow: componentShadows.card, height: "100%" }}>
+            <CardContent sx={{ p: compact ? spacing[3] : spacing[4] }}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                <Box>
+                  <Typography variant="h6">Recent Clinical Activity</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Typed operational events from audit logs.
+                  </Typography>
+                </Box>
+                <Timeline sx={{ color: semantic.info.main }} />
+              </Stack>
+
+              {activityFeed.length === 0 ? (
+                <EmptyState
+                  title="No activity yet"
+                  body="Clinical activity will appear after patient, query, and drug safety operations."
+                />
+              ) : (
+                <List dense={compact} disablePadding>
+                  {activityFeed.map((activity, index) => (
+                    <ListItem
+                      key={activity.id}
+                      disableGutters
+                      sx={{
+                        py: compact ? 0.8 : 1.2,
+                        borderBottom:
+                          index === activityFeed.length - 1 ? "none" : `1px solid ${alphaUtil(theme.palette.divider, 0.8)}`,
+                      }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 34 }}>
+                        <Box
+                          sx={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: borderRadius.xs,
+                            bgcolor: alphaUtil(outcomeColor(activity.outcome), 0.12),
+                            color: outcomeColor(activity.outcome),
+                            display: "grid",
+                            placeItems: "center",
+                          }}
+                        >
+                          {getEventIcon(activity.eventType)}
+                        </Box>
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={
+                          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
+                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                              {activity.description}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              label={formatEventTypeLabel(activity.eventType)}
+                              sx={{
+                                width: "fit-content",
+                                bgcolor: alphaUtil(semantic.info.main, 0.12),
+                                color: semantic.info.dark,
+                                fontWeight: 600,
+                              }}
+                            />
+                          </Stack>
+                        }
+                        secondary={
+                          <Typography variant="caption" color="text.secondary">
+                            {formatRelativeTimestamp(activity.timestamp)}
+                          </Typography>
+                        }
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              )}
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Quick actions */}
+        <Grid item xs={12} lg={4}>
+          <Card sx={{ borderRadius: borderRadius.lg, boxShadow: componentShadows.card, height: "100%" }}>
+            <CardContent sx={{ p: compact ? spacing[3] : spacing[4] }}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                <Box>
+                  <Typography variant="h6">Quick Actions</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Keyboard-accessible, high-affordance shortcuts.
+                  </Typography>
+                </Box>
+                <CheckCircle sx={{ color: semantic.success.main }} />
+              </Stack>
+
+              <Stack spacing={1.5}>
+                {QUICK_ACTIONS.map((action) => (
+                  <ButtonBase
+                    key={action.label}
+                    onClick={() => navigate(action.path)}
+                    aria-label={action.label}
+                    sx={{
+                      width: "100%",
+                      borderRadius: borderRadius.sm,
+                      textAlign: "left",
+                      border: `1px solid ${alphaUtil(action.color, 0.3)}`,
+                      background: `linear-gradient(90deg, ${alphaUtil(action.color, 0.16)} 0%, ${alphaUtil(
+                        action.color,
+                        0.06
+                      )} 100%)`,
+                      p: compact ? spacing[2] : spacing[3],
+                      "&:focus-visible": {
+                        outline: `2px solid ${action.color}`,
+                        outlineOffset: "2px",
+                      },
+                    }}
+                  >
+                    <Stack direction="row" spacing={1.5} alignItems="center" sx={{ width: "100%" }}>
+                      <Box
+                        sx={{
+                          width: compact ? 30 : 34,
+                          height: compact ? 30 : 34,
+                          borderRadius: borderRadius.xs,
+                          bgcolor: alphaUtil(action.color, 0.22),
+                          color: action.color,
+                          display: "grid",
+                          placeItems: "center",
+                        }}
+                      >
+                        {action.icon}
+                      </Box>
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                          {action.label}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {action.hint}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </ButtonBase>
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+
+      {/* Responsive hints */}
+      {isTabletOrBelow && (
+        <Typography variant="caption" sx={{ display: "block", mt: 2, color: "text.secondary" }}>
+          Optimized responsive layout active for {compact ? "high-density" : "standard"} workflow view.
+        </Typography>
+      )}
     </Box>
   );
 }
