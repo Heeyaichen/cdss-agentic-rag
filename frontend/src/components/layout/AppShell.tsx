@@ -9,12 +9,13 @@
 
 import { ReactNode, useState } from 'react';
 import { Box, useTheme, useMediaQuery } from '@mui/material';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 
 import Navbar from './Navbar';
 import Sidebar from './Sidebar';
 import MobileNav from './MobileNav';
 import StatusBar from './StatusBar';
+import PageTransition from '@/components/common/PageTransition';
 import { spacing } from '@/theme';
 
 // ============================================================================
@@ -59,6 +60,7 @@ export function AppShell({
   connectionMessage,
 }: AppShellProps) {
   const theme = useTheme();
+  const location = useLocation();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -118,7 +120,7 @@ export function AppShell({
             overflowX: 'hidden',
           }}
         >
-          {children || <Outlet />}
+          <PageTransition transitionKey={location.pathname}>{children || <Outlet />}</PageTransition>
         </Box>
       </Box>
 

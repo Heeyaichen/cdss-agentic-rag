@@ -16,3 +16,6 @@ export type { ChipProps, ChipVariant, ChipColor, ChipSize } from './Chip';
 
 export { default as Skeleton, SkeletonGroup, CardSkeleton, TableRowSkeleton } from './Skeleton';
 export type { SkeletonProps, SkeletonVariant, SkeletonAnimation } from './Skeleton';
+
+export { PageContainer, PageHeader, SectionCard } from "./PagePrimitives";
+export type { PageContainerProps, PageHeaderProps, SectionCardProps } from "./PagePrimitives";

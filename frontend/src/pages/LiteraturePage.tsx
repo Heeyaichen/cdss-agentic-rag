@@ -20,6 +20,7 @@ import {
 } from "@mui/material";
 import { Article, ContentCopy, OpenInNew, Search, Tune } from "@mui/icons-material";
 import { useMutation } from "@tanstack/react-query";
+import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
 import type { PubMedArticle } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, spacing } from "@/theme";
@@ -122,15 +123,11 @@ export default function LiteraturePage() {
   };
 
   return (
-    <Box>
-      <Box sx={{ mb: spacing[4] }}>
-        <Typography variant="h4" sx={{ mb: 0.5 }}>
-          Literature Evidence Workspace
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Search, filter, and rank medical evidence with clear provenance and fast abstract drill-down.
-        </Typography>
-      </Box>
+    <PageContainer>
+      <PageHeader
+        title="Literature Evidence Workspace"
+        subtitle="Search, filter, and rank medical evidence with clear provenance and fast abstract drill-down."
+      />
 
       <Grid container spacing={2}>
         <Grid item xs={12} lg={3}>
@@ -391,6 +388,6 @@ export default function LiteraturePage() {
         onClose={() => setSnackbarMessage("")}
         message={snackbarMessage}
       />
-    </Box>
+    </PageContainer>
   );
 }

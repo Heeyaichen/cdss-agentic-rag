@@ -22,6 +22,7 @@ import {
 import { Download, FilterAlt, Refresh } from "@mui/icons-material";
 import { useQuery } from "@tanstack/react-query";
 import dayjs from "dayjs";
+import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
 import type { AuditLogEntry } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
@@ -151,15 +152,11 @@ export default function AdminPage() {
   const rowPaddingY = compactMode ? 0.55 : 1.2;
 
   return (
-    <Box>
-      <Box sx={{ mb: spacing[4] }}>
-        <Typography variant="h4" sx={{ mb: 0.5 }}>
-          Admin Operations Console
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          High-density audit surveillance for PHI handling, denied actions, and failure events.
-        </Typography>
-      </Box>
+    <PageContainer>
+      <PageHeader
+        title="Admin Operations Console"
+        subtitle="High-density audit surveillance for PHI handling, denied actions, and failure events."
+      />
 
       <Grid container spacing={2}>
         <Grid item xs={12}>
@@ -390,6 +387,6 @@ export default function AdminPage() {
           Failed to load audit trail. Check backend availability and retry.
         </Alert>
       )}
-    </Box>
+    </PageContainer>
   );
 }

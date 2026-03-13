@@ -22,6 +22,7 @@ import {
 import { Error as ErrorIcon, Medication, Search, WarningAmber } from "@mui/icons-material";
 import { useMutation } from "@tanstack/react-query";
 import InteractionMatrix from "@/components/drugs/InteractionMatrix";
+import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
 import type { DrugInteraction } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
@@ -87,15 +88,11 @@ export default function DrugCheckerPage() {
   };
 
   return (
-    <Box>
-      <Box sx={{ mb: spacing[4] }}>
-        <Typography variant="h4" sx={{ mb: 0.5 }}>
-          Drug Safety Workspace
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Enter medications in a tokenized command bar, then review the interaction matrix before detailed guidance.
-        </Typography>
-      </Box>
+    <PageContainer>
+      <PageHeader
+        title="Drug Safety Workspace"
+        subtitle="Enter medications in a tokenized command bar, then review the interaction matrix before detailed guidance."
+      />
 
       <Card sx={{ mb: spacing[3], borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>
         <CardContent sx={{ p: spacing[4] }}>
@@ -355,6 +352,6 @@ export default function DrugCheckerPage() {
           )}
         </Stack>
       )}
-    </Box>
+    </PageContainer>
   );
 }

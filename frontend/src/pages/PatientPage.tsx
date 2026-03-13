@@ -20,6 +20,7 @@ import { Medication, Person, Science, WarningAmber } from "@mui/icons-material";
 import { useNavigate, useParams } from "react-router-dom";
 import LabResultsChart from "@/components/patient/LabResultsChart";
 import MedicationList from "@/components/patient/MedicationList";
+import { PageContainer, PageHeader } from "@/components/ui";
 import { usePatient, usePatientSearch } from "@/hooks/usePatientData";
 import type { LabResult, PatientProfile } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing, transitions } from "@/theme";
@@ -69,15 +70,11 @@ export default function PatientPage() {
   }, [patient]);
 
   return (
-    <Box>
-      <Box sx={{ mb: spacing[4] }}>
-        <Typography variant="h4" sx={{ mb: 0.5 }}>
-          Patients Workspace
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Master-detail profile workflow with compact patient navigation and rich clinical context.
-        </Typography>
-      </Box>
+    <PageContainer>
+      <PageHeader
+        title="Patients Workspace"
+        subtitle="Master-detail profile workflow with compact patient navigation and rich clinical context."
+      />
 
       <Grid container spacing={2}>
         {/* Master list */}
@@ -311,7 +308,7 @@ export default function PatientPage() {
           )}
         </Grid>
       </Grid>
-    </Box>
+    </PageContainer>
   );
 }
 

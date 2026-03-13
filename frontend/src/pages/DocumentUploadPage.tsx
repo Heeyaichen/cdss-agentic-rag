@@ -23,6 +23,7 @@ import {
   Replay,
   UploadFile,
 } from "@mui/icons-material";
+import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
 import type { DocumentIngestionStatusResponse } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
@@ -241,15 +242,11 @@ export default function DocumentUploadPage() {
   ).length;
 
   return (
-    <Box>
-      <Box sx={{ mb: spacing[4] }}>
-        <Typography variant="h4" sx={{ mb: 0.5 }}>
-          Documents Ingestion Pipeline
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Upload, parse, and index clinical documents with timeline visibility, backend status polling, and retry controls.
-        </Typography>
-      </Box>
+    <PageContainer>
+      <PageHeader
+        title="Documents Ingestion Pipeline"
+        subtitle="Upload, parse, and index clinical documents with timeline visibility, backend status polling, and retry controls."
+      />
 
       <Grid container spacing={2}>
         <Grid item xs={12} lg={4}>
@@ -454,6 +451,6 @@ export default function DocumentUploadPage() {
           {errorCount} file{errorCount > 1 ? "s" : ""} failed ingestion. Use Retry to recover without rebuilding the entire queue.
         </Alert>
       )}
-    </Box>
+    </PageContainer>
   );
 }
