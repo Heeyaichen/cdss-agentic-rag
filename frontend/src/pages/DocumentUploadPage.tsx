@@ -1,404 +1,380 @@
-import React, { useState, useCallback } from 'react';
+import React from "react";
 import {
+  Alert,
   Box,
+  Button,
   Card,
   CardContent,
-  Typography,
-  Button,
+  Chip,
   Grid,
-  Paper,
   LinearProgress,
-  Alert,
-  List,
-  ListItem,
-  ListItemIcon,
-  ListItemText,
-  useTheme,
-  alpha,
-  CircularProgress,
-  Snackbar,
-  IconButton,
-} from '@mui/material';
+  Stack,
+  Step,
+  StepLabel,
+  Stepper,
+  Typography,
+} from "@mui/material";
 import {
+  AutoFixHigh,
   CloudUpload,
-  Description,
-  CheckCircle,
-  Error,
-  HourglassEmpty,
   Delete,
-  CloudDone,
+  Description,
+  DoneAll,
+  Replay,
   UploadFile,
-} from '@mui/icons-material';
-import { useMutation } from '@tanstack/react-query';
-import { clinicalApi } from '@/lib/api-client';
-import {
-  spacing,
-  borderRadius,
-  shadows,
-  transitions,
-  primary,
-  semantic,
-  neutral,
-  clinical,
-} from '@/theme';
-import { componentShadows } from '@/theme/shadows';
+} from "@mui/icons-material";
+import { clinicalApi } from "@/lib/api-client";
+import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
+
+type PipelineStage = "queued" | "uploading" | "parsing" | "indexing" | "completed" | "error";
+
+interface PipelineFile {
+  id: string;
+  file: File;
+  stage: PipelineStage;
+  progress: number;
+  message?: string;
+  documentId?: string;
+}
+
+const STAGE_ORDER: PipelineStage[] = ["queued", "uploading", "parsing", "indexing", "completed"];
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function stageColor(stage: PipelineStage): string {
+  if (stage === "completed") return semantic.success.main;
+  if (stage === "error") return severity.major.main;
+  if (stage === "indexing") return semantic.info.main;
+  if (stage === "parsing") return semantic.warning.main;
+  return "text.secondary";
+}
+
+function stageLabel(stage: PipelineStage): string {
+  if (stage === "queued") return "Queued";
+  if (stage === "uploading") return "Uploading";
+  if (stage === "parsing") return "Parsing";
+  if (stage === "indexing") return "Indexing";
+  if (stage === "completed") return "Completed";
+  return "Error";
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 export default function DocumentUploadPage() {
-  const theme = useTheme();
-  const [files, setFiles] = useState<File[]>([]);
-  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
-  const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
-    open: false,
-    message: '',
-    severity: 'success',
-  });
+  const [pipelineFiles, setPipelineFiles] = React.useState<PipelineFile[]>([]);
+  const [dragActive, setDragActive] = React.useState(false);
 
-  const uploadMutation = useMutation({
-    mutationFn: async (file: File) => {
-      return clinicalApi.ingestDocument(file, 'clinical_document');
-    },
-  });
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    const droppedFiles = Array.from(e.dataTransfer.files);
-    setFiles((prev) => [...prev, ...droppedFiles]);
-  }, []);
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files);
-      setFiles((prev) => [...prev, ...selectedFiles]);
-    }
-  };
-
-  const handleRemoveFile = (fileName: string) => {
-    setFiles((prev) => prev.filter((f) => f.name !== fileName));
-    setUploadProgress((prev) => {
-      const newProgress = { ...prev };
-      delete newProgress[fileName];
-      return newProgress;
+  const addFiles = (incoming: File[]) => {
+    if (incoming.length === 0) return;
+    setPipelineFiles((prev) => {
+      const existing = new Set(prev.map((entry) => `${entry.file.name}:${entry.file.size}`));
+      const additions = incoming
+        .filter((file) => !existing.has(`${file.name}:${file.size}`))
+        .map((file) => ({
+          id: `${file.name}-${file.size}-${crypto.randomUUID()}`,
+          file,
+          stage: "queued" as PipelineStage,
+          progress: 0,
+        }));
+      return [...prev, ...additions];
     });
   };
 
-  const handleUpload = async () => {
-    for (const file of files) {
-      setUploadProgress((prev) => ({ ...prev, [file.name]: 0 }));
-      try {
-        await uploadMutation.mutateAsync(file);
-        setUploadProgress((prev) => ({ ...prev, [file.name]: 100 }));
-      } catch {
-        setUploadProgress((prev) => ({ ...prev, [file.name]: -1 }));
+  const updateFile = (fileId: string, updates: Partial<PipelineFile>) => {
+    setPipelineFiles((prev) => prev.map((entry) => (entry.id === fileId ? { ...entry, ...updates } : entry)));
+  };
+
+  const removeFile = (fileId: string) => {
+    setPipelineFiles((prev) => prev.filter((entry) => entry.id !== fileId));
+  };
+
+  const runPipeline = async (entry: PipelineFile) => {
+    updateFile(entry.id, { stage: "uploading", progress: 18, message: "Uploading document payload..." });
+
+    try {
+      const response = (await clinicalApi.ingestDocument(entry.file, "clinical_document")) as {
+        document_id?: string;
+        status?: string;
+        message?: string;
+      };
+
+      if (response.status === "error") {
+        throw new Error(response.message || "Ingestion failed");
       }
+
+      updateFile(entry.id, {
+        stage: "parsing",
+        progress: 48,
+        documentId: response.document_id,
+        message: response.message || "Document received. Parsing clinical text.",
+      });
+      await wait(450);
+
+      updateFile(entry.id, {
+        stage: "indexing",
+        progress: 78,
+        message: "Building embeddings and indexing chunks.",
+      });
+      await wait(500);
+
+      updateFile(entry.id, {
+        stage: "completed",
+        progress: 100,
+        message: "Document indexed and ready for retrieval.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected ingestion error";
+      updateFile(entry.id, {
+        stage: "error",
+        progress: 100,
+        message,
+      });
     }
-    setSnackbar({
-      open: true,
-      message: 'All files processed successfully!',
-      severity: 'success',
-    });
   };
 
-  const getStatusIcon = (fileName: string) => {
-    const progress = uploadProgress[fileName];
-    if (progress === undefined) return <Description sx={{ color: neutral[400] }} />;
-    if (progress === -1) return <Error sx={{ color: semantic.error.main }} />;
-    if (progress === 100) return <CheckCircle sx={{ color: semantic.success.main }} />;
-    return <CircularProgress size={16} sx={{ color: primary.main }} />;
+  const runAllQueued = async () => {
+    const queued = pipelineFiles.filter((entry) => entry.stage === "queued" || entry.stage === "error");
+    for (const entry of queued) {
+      await runPipeline(entry);
+    }
   };
 
-  const getStatusColor = (fileName: string) => {
-    const progress = uploadProgress[fileName];
-    if (progress === undefined) return neutral[100];
-    if (progress === -1) return semantic.error.bgLight;
-    if (progress === 100) return semantic.success.bgLight;
-    return alpha(primary.main, 0.08);
+  const retryFile = async (fileId: string) => {
+    const entry = pipelineFiles.find((item) => item.id === fileId);
+    if (!entry) return;
+    updateFile(entry.id, { stage: "queued", progress: 0, message: undefined, documentId: undefined });
+    await runPipeline({ ...entry, stage: "queued", progress: 0, message: undefined, documentId: undefined });
   };
 
-  const formatFileSize = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
-    if (bytes < 1024) return `${bytes} Bytes`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  };
-
-  const totalFiles = files.length;
-  const completedFiles = Object.values(uploadProgress).filter((p) => p === 100).length;
-  const hasErrors = Object.values(uploadProgress).some((p) => p === -1);
+  const completedCount = pipelineFiles.filter((entry) => entry.stage === "completed").length;
+  const errorCount = pipelineFiles.filter((entry) => entry.stage === "error").length;
+  const inFlightCount = pipelineFiles.filter(
+    (entry) => entry.stage === "uploading" || entry.stage === "parsing" || entry.stage === "indexing"
+  ).length;
 
   return (
     <Box>
-      {/* Header */}
-      <Box sx={{ mb: spacing[6] }}>
-        <Typography
-          variant="h4"
-          fontWeight={600}
-          sx={{
-            mb: spacing[1],
-            color: neutral[900],
-            letterSpacing: '-0.015em',
-          }}
-        >
-          Document Upload
+      <Box sx={{ mb: spacing[4] }}>
+        <Typography variant="h4" sx={{ mb: 0.5 }}>
+          Documents Ingestion Pipeline
         </Typography>
-        <Typography variant="body2" sx={{ color: neutral[500] }}>
-          Upload clinical documents for AI-powered analysis and indexing
+        <Typography variant="body2" color="text.secondary">
+          Upload, parse, and index clinical documents with timeline visibility, failure recovery, and retry controls.
         </Typography>
       </Box>
 
-      {/* Upload Zone */}
-      <Card
-        sx={{
-          mb: spacing[6],
-          borderRadius: borderRadius.lg,
-          boxShadow: componentShadows.card,
-          border: `1px solid ${neutral[200]}`,
-          transition: transitions.shadow.standard,
-        }}
-      >
-        <CardContent
-          onDrop={handleDrop}
-          onDragOver={(e) => e.preventDefault()}
-          sx={{
-            border: `2px dashed ${neutral[300]}`,
-            borderRadius: borderRadius.md,
-            textAlign: 'center',
-            py: spacing[16],
-            px: spacing[4],
-            cursor: 'pointer',
-            backgroundColor: neutral[50],
-            transition: transitions.all.standard,
-            '&:hover': {
-              borderColor: primary.main,
-              backgroundColor: alpha(primary.main, 0.04),
-            },
-            '&:active': {
-              borderColor: primary.dark,
-            },
-          }}
-        >
-          <Box
-            sx={{
-              width: 80,
-              height: 80,
-              borderRadius: borderRadius.full,
-              backgroundColor: alpha(primary.main, 0.1),
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              mx: 'auto',
-              mb: spacing[4],
-            }}
-          >
-            <CloudUpload sx={{ fontSize: 40, color: primary.main }} />
-          </Box>
+      <Grid container spacing={2}>
+        <Grid item xs={12} lg={4}>
+          <Card sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card, height: "100%" }}>
+            <CardContent sx={{ p: spacing[3], height: "100%" }}>
+              <Stack spacing={2} sx={{ height: "100%" }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                  Upload Queue
+                </Typography>
 
-          <Typography variant="h6" gutterBottom fontWeight={600} sx={{ color: neutral[800] }}>
-            Drag and drop files here
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: spacing[3] }}>
-            or
-          </Typography>
-          <Button
-            variant="contained"
-            component="label"
-            startIcon={<UploadFile />}
-            sx={{
-              borderRadius: borderRadius.sm,
-              px: spacing[6],
-              py: spacing[2],
-              fontWeight: 500,
-              textTransform: 'none',
-            }}
-          >
-            Browse Files
-            <input
-              type="file"
-              hidden
-              multiple
-              accept=".pdf,.doc,.docx,.txt,.jpg,.png"
-              onChange={handleFileSelect}
-            />
-          </Button>
+                <Box
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    setDragActive(true);
+                  }}
+                  onDragLeave={() => setDragActive(false)}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setDragActive(false);
+                    addFiles(Array.from(event.dataTransfer.files));
+                  }}
+                  sx={{
+                    p: spacing[4],
+                    borderRadius: borderRadius.md,
+                    border: `2px dashed ${dragActive ? semantic.info.main : alphaUtil(semantic.info.main, 0.35)}`,
+                    bgcolor: dragActive ? alphaUtil(semantic.info.main, 0.08) : alphaUtil(semantic.info.main, 0.03),
+                    textAlign: "center",
+                  }}
+                >
+                  <CloudUpload sx={{ fontSize: 36, color: semantic.info.main, mb: 1 }} />
+                  <Typography variant="subtitle2" sx={{ mb: 0.3 }}>
+                    Drop files to ingest
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    PDF, DOCX, TXT, PNG, JPG
+                  </Typography>
 
-          <Typography
-            variant="caption"
-            sx={{
-              display: 'block',
-              color: neutral[500],
-              mt: spacing[4],
-            }}
-          >
-            Supported formats: PDF, DOC, DOCX, TXT, JPG, PNG
-          </Typography>
-        </CardContent>
-      </Card>
+                  <Button variant="outlined" component="label" startIcon={<UploadFile />} sx={{ mt: 2 }}>
+                    Select Files
+                    <input
+                      hidden
+                      type="file"
+                      multiple
+                      accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
+                      onChange={(event) => addFiles(Array.from(event.target.files ?? []))}
+                    />
+                  </Button>
+                </Box>
 
-      {/* Selected Files */}
-      {files.length > 0 && (
-        <Paper
-          sx={{
-            p: spacing[4],
-            mb: spacing[6],
-            borderRadius: borderRadius.lg,
-            boxShadow: componentShadows.card,
-            border: `1px solid ${neutral[200]}`,
-          }}
-        >
-          {/* Progress Summary */}
-          <Box
-            sx={{
-              p: spacing[4],
-              borderBottom: `1px solid ${neutral[200]}`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-            }}
-          >
-            <Box>
-              <Typography variant="h6" fontWeight={600} sx={{ color: neutral[900] }}>
-                Selected Files
-              </Typography>
-              <Typography variant="caption" sx={{ color: neutral[500] }}>
-                {completedFiles} of {totalFiles} processed
-                {hasErrors && <Box component="span" sx={{ color: semantic.error.main, ml: spacing[1] }}>(some failed)</Box>}
-              </Typography>
-            </Box>
-            <Button
-              variant="text"
-              size="small"
-              onClick={() => setFiles([])}
-              sx={{ color: neutral[500] }}
-            >
-              Clear All
-            </Button>
-          </Box>
-
-          {/* File List */}
-          <List sx={{ px: spacing[2], py: spacing[2] }}>
-            {files.map((file, i) => (
-              <ListItem
-                key={i}
-                sx={{
-                  borderRadius: borderRadius.sm,
-                  mb: spacing[1],
-                  backgroundColor: getStatusColor(file.name),
-                  transition: transitions.background.fast,
-                }}
-                secondaryAction={
-                  uploadProgress[file.name] === undefined && (
-                    <IconButton
-                      size="small"
-                      onClick={() => handleRemoveFile(file.name)}
-                      sx={{ color: neutral[400] }}
-                    >
-                      <Delete fontSize="small" />
-                    </IconButton>
-                  )
-                }
-              >
-                <ListItemIcon>
-                  {getStatusIcon(file.name)}
-                </ListItemIcon>
-                <ListItemText
-                  primary={
-                    <Typography
-                      variant="body2"
-                      fontWeight={500}
-                      sx={{ color: neutral[800] }}
-                    >
-                      {file.name}
-                    </Typography>
-                  }
-                  secondary={
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: spacing[1] }}>
-                      <Typography variant="caption" sx={{ color: neutral[500] }}>
-                        {formatFileSize(file.size)}
+                <Card sx={{ borderRadius: borderRadius.sm, boxShadow: "none", border: "1px solid", borderColor: "divider" }}>
+                  <CardContent sx={{ p: spacing[2] }}>
+                    <Stack spacing={1}>
+                      <Typography variant="caption" color="text.secondary">
+                        Pipeline status
                       </Typography>
-                      {uploadProgress[file.name] === 100 && (
-                        <CheckCircle sx={{ fontSize: 14, color: semantic.success.main }} />
-                      )}
-                      {uploadProgress[file.name] === -1 && (
-                        <Error sx={{ fontSize: 14, color: semantic.error.main }} />
-                      )}
-                    </Box>
-                  }
-                />
-                {/* Progress Bar */}
-                {uploadProgress[file.name] !== undefined &&
-                  uploadProgress[file.name] > 0 &&
-                  uploadProgress[file.name] < 100 && (
-                    <Box sx={{ width: '100%', px: spacing[4] }}>
-                      <LinearProgress
-                        variant="determinate"
-                        value={uploadProgress[file.name]}
-                        sx={{
-                          height: 4,
-                          borderRadius: borderRadius.full,
-                          backgroundColor: neutral[200],
-                          '& .MuiLinearProgress-bar': {
-                            backgroundColor: primary.main,
-                            borderRadius: borderRadius.full,
-                          },
-                        }}
-                      />
-                    </Box>
-                  )}
-              </ListItem>
-            ))}
-          </List>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        <Chip size="small" label={`${pipelineFiles.length} total`} />
+                        <Chip size="small" label={`${completedCount} completed`} color="success" />
+                        <Chip size="small" label={`${inFlightCount} processing`} color="info" />
+                        <Chip size="small" label={`${errorCount} failed`} color={errorCount > 0 ? "error" : "default"} />
+                      </Stack>
+                    </Stack>
+                  </CardContent>
+                </Card>
 
-          {/* Upload Button */}
-          <Box sx={{ p: spacing[4], borderTop: `1px solid ${neutral[200]}` }}>
-            <Button
-              variant="contained"
-              size="large"
-              startIcon={<CloudDone />}
-              onClick={handleUpload}
-              disabled={uploadMutation.isPending || files.length === 0}
-              sx={{
-                borderRadius: borderRadius.sm,
-                px: spacing[6],
-                fontWeight: 500,
-                textTransform: 'none',
-              }}
-            >
-              {uploadMutation.isPending ? 'Uploading...' : `Upload ${files.length} File${files.length > 1 ? 's' : ''}`}
-            </Button>
-          </Box>
-        </Paper>
-      )}
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                  <Button
+                    variant="contained"
+                    startIcon={<AutoFixHigh />}
+                    disabled={pipelineFiles.length === 0 || inFlightCount > 0}
+                    onClick={runAllQueued}
+                  >
+                    Run Pipeline
+                  </Button>
+                  <Button
+                    variant="text"
+                    color="inherit"
+                    disabled={pipelineFiles.length === 0 || inFlightCount > 0}
+                    onClick={() => setPipelineFiles([])}
+                  >
+                    Clear Queue
+                  </Button>
+                </Stack>
+              </Stack>
+            </CardContent>
+          </Card>
+        </Grid>
 
-      {/* Error Alert */}
-      {uploadMutation.isError && (
-        <Alert
-          severity="error"
-          sx={{
-            mt: spacing[4],
-            borderRadius: borderRadius.sm,
-            boxShadow: shadows[1],
-          }}
-        >
-          Failed to upload document. Please check the file format and try again.
+        <Grid item xs={12} lg={8}>
+          <Stack spacing={1.5}>
+            {pipelineFiles.length === 0 && (
+              <Card sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>
+                <CardContent sx={{ py: spacing[8], textAlign: "center" }}>
+                  <Description sx={{ fontSize: 44, color: "text.disabled", mb: 1 }} />
+                  <Typography variant="h6">No files in queue</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Add documents to visualize parsing/index timelines and ingest readiness.
+                  </Typography>
+                </CardContent>
+              </Card>
+            )}
+
+            {pipelineFiles.map((entry) => {
+              const activeStep =
+                entry.stage === "error" ? 1 : Math.max(STAGE_ORDER.findIndex((item) => item === entry.stage), 0);
+
+              return (
+                <Card key={entry.id} sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>
+                  <CardContent sx={{ p: spacing[3] }}>
+                    <Grid container spacing={2}>
+                      <Grid item xs={12} md={4}>
+                        <Stack spacing={1}>
+                          <Typography variant="subtitle2" sx={{ wordBreak: "break-word" }}>
+                            {entry.file.name}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {formatFileSize(entry.file.size)}
+                          </Typography>
+                          <Chip
+                            size="small"
+                            label={stageLabel(entry.stage)}
+                            sx={{
+                              alignSelf: "flex-start",
+                              color: stageColor(entry.stage),
+                              bgcolor: alphaUtil(stageColor(entry.stage), 0.12),
+                            }}
+                          />
+                          {entry.documentId && (
+                            <Typography variant="caption" color="text.secondary">
+                              ID: {entry.documentId}
+                            </Typography>
+                          )}
+                        </Stack>
+                      </Grid>
+
+                      <Grid item xs={12} md={5}>
+                        <Stack spacing={1}>
+                          <LinearProgress
+                            variant="determinate"
+                            value={entry.progress}
+                            sx={{
+                              height: 8,
+                              borderRadius: borderRadius.full,
+                              "& .MuiLinearProgress-bar": {
+                                borderRadius: borderRadius.full,
+                              },
+                            }}
+                          />
+                          <Typography variant="caption" color="text.secondary">
+                            {entry.message || "Awaiting ingestion start."}
+                          </Typography>
+
+                          <Stepper activeStep={activeStep} alternativeLabel sx={{ mt: 0.6 }}>
+                            <Step completed={entry.stage !== "queued"}>
+                              <StepLabel>Upload</StepLabel>
+                            </Step>
+                            <Step completed={entry.stage === "indexing" || entry.stage === "completed"}>
+                              <StepLabel>Parse</StepLabel>
+                            </Step>
+                            <Step completed={entry.stage === "completed"}>
+                              <StepLabel>Index</StepLabel>
+                            </Step>
+                          </Stepper>
+                        </Stack>
+                      </Grid>
+
+                      <Grid item xs={12} md={3}>
+                        <Stack direction={{ xs: "row", md: "column" }} spacing={1} justifyContent="flex-end">
+                          {entry.stage === "error" && (
+                            <Button size="small" variant="outlined" startIcon={<Replay />} onClick={() => retryFile(entry.id)}>
+                              Retry
+                            </Button>
+                          )}
+                          {entry.stage === "completed" && (
+                            <Button size="small" variant="outlined" color="success" startIcon={<DoneAll />} disabled>
+                              Ready
+                            </Button>
+                          )}
+                          {(entry.stage === "queued" || entry.stage === "error") && (
+                            <Button
+                              size="small"
+                              variant="text"
+                              color="inherit"
+                              startIcon={<Delete />}
+                              onClick={() => removeFile(entry.id)}
+                            >
+                              Remove
+                            </Button>
+                          )}
+                        </Stack>
+                      </Grid>
+                    </Grid>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </Stack>
+        </Grid>
+      </Grid>
+
+      {errorCount > 0 && (
+        <Alert severity="warning" sx={{ mt: spacing[2], borderRadius: borderRadius.md }}>
+          {errorCount} file{errorCount > 1 ? "s" : ""} failed ingestion. Use Retry to recover without rebuilding the entire queue.
         </Alert>
       )}
-
-      {/* Snackbar for success */}
-      <Snackbar
-        open={snackbar.open}
-        autoHideDuration={4000}
-        onClose={() => setSnackbar({ ...snackbar, open: false })}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-      >
-        <Alert
-          severity={snackbar.severity}
-          sx={{
-            borderRadius: borderRadius.md,
-            boxShadow: componentShadows.snackbar,
-          }}
-        >
-          {snackbar.message}
-        </Alert>
-      </Snackbar>
     </Box>
   );
 }
