@@ -55,6 +55,20 @@ param docIntelRestore bool = false
 @description('Cosmos DB database name')
 param cosmosDatabaseName string = 'cdss-db'
 
+@description('Allowed CORS origins for the backend API.')
+param corsAllowedOrigins array = [
+  'http://localhost:3000'
+]
+
+@description('Enable Azure Entra ID JWT authentication middleware in the API.')
+param authEnabled bool = environment == 'prod'
+
+@description('Expected JWT audience for API bearer tokens (Application ID URI / client ID).')
+param authAudience string = ''
+
+@description('Optional required scopes for API access.')
+param authRequiredScopes array = []
+
 @description('Tags to apply to all resources')
 param tags object = {
   project: 'cdss-agentic-rag'
@@ -389,6 +403,42 @@ resource keyVaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' =
 resource keyVaultPrivateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
   parent: keyVaultPrivateDnsZone
   name: '${vnetName}-keyvault-link'
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: vnet.id
+    }
+    registrationEnabled: false
+  }
+}
+
+resource openaiPrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.openai.azure.com'
+  location: 'global'
+  tags: tags
+}
+
+resource openaiPrivateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: openaiPrivateDnsZone
+  name: '${vnetName}-openai-link'
+  location: 'global'
+  properties: {
+    virtualNetwork: {
+      id: vnet.id
+    }
+    registrationEnabled: false
+  }
+}
+
+resource cognitivePrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.cognitiveservices.azure.com'
+  location: 'global'
+  tags: tags
+}
+
+resource cognitivePrivateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: cognitivePrivateDnsZone
+  name: '${vnetName}-cognitiveservices-link'
   location: 'global'
   properties: {
     virtualNetwork: {
@@ -848,7 +898,7 @@ resource agentStateContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases
       id: 'agent-state'
       partitionKey: {
         paths: [
-          '/agent_id'
+          '/session_id'
         ]
         kind: 'Hash'
         version: 2
@@ -1022,6 +1072,14 @@ resource cosmosConnectionStringSecret 'Microsoft.KeyVault/vaults/secrets@2023-07
   }
 }
 
+resource cosmosPrimaryKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'cosmos-primary-key'
+  properties: {
+    value: cosmosAccount.listKeys().primaryMasterKey
+  }
+}
+
 resource searchApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'search-api-key'
@@ -1046,11 +1104,11 @@ resource docIntelligenceKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01'
   }
 }
 
-resource redisConnectionStringSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource redisUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
-  name: 'redis-connection-string'
+  name: 'redis-url'
   properties: {
-    value: '${redis.properties.hostName}:${redis.properties.sslPort},password=${redis.listKeys().primaryKey},ssl=True,abortConnect=False'
+    value: 'rediss://:${redis.listKeys().primaryKey}@${redis.properties.hostName}:${redis.properties.sslPort}/0'
   }
 }
 
@@ -1239,6 +1297,84 @@ resource searchPrivateEndpointDnsGroup 'Microsoft.Network/privateEndpoints/priva
   }
 }
 
+// --- Azure OpenAI Private Endpoint ---
+
+resource openaiPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (environment == 'prod') {
+  name: '${openaiName}-pe'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: '${vnet.id}/subnets/${aiSubnetName}'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: '${openaiName}-plsc'
+        properties: {
+          privateLinkServiceId: openai.id
+          groupIds: [
+            'account'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource openaiPrivateEndpointDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (environment == 'prod') {
+  parent: openaiPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'openai-dns-config'
+        properties: {
+          privateDnsZoneId: openaiPrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
+// --- Document Intelligence Private Endpoint ---
+
+resource docIntelPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (environment == 'prod') {
+  name: '${docIntelligenceName}-pe'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: '${vnet.id}/subnets/${aiSubnetName}'
+    }
+    privateLinkServiceConnections: [
+      {
+        name: '${docIntelligenceName}-plsc'
+        properties: {
+          privateLinkServiceId: documentIntelligence.id
+          groupIds: [
+            'account'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource docIntelPrivateEndpointDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (environment == 'prod') {
+  parent: docIntelPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'docintel-dns-config'
+        properties: {
+          privateDnsZoneId: cognitivePrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
 // ============================================================================
 // COMPUTE - Container Apps
 // ============================================================================
@@ -1279,6 +1415,11 @@ var containerAppBaseSecrets = [
     identity: managedIdentity.id
   }
   {
+    name: 'cosmos-primary-key'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/cosmos-primary-key'
+    identity: managedIdentity.id
+  }
+  {
     name: 'search-api-key'
     keyVaultUrl: '${keyVault.properties.vaultUri}secrets/search-api-key'
     identity: managedIdentity.id
@@ -1294,8 +1435,8 @@ var containerAppBaseSecrets = [
     identity: managedIdentity.id
   }
   {
-    name: 'redis-connection-string'
-    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/redis-connection-string'
+    name: 'redis-url'
+    keyVaultUrl: '${keyVault.properties.vaultUri}secrets/redis-url'
     identity: managedIdentity.id
   }
 ]
@@ -1316,60 +1457,104 @@ var containerAppBaseEnv = [
     value: environment
   }
   {
-    name: 'AZURE_OPENAI_ENDPOINT'
+    name: 'CDSS_AZURE_OPENAI_ENDPOINT'
     value: openai.properties.endpoint
   }
   {
-    name: 'AZURE_OPENAI_API_KEY'
+    name: 'CDSS_AZURE_OPENAI_API_KEY'
     secretRef: 'openai-api-key'
   }
   {
-    name: 'AZURE_OPENAI_GPT4O_DEPLOYMENT'
+    name: 'CDSS_AZURE_OPENAI_DEPLOYMENT_NAME'
     value: gpt4oDeploymentName
   }
   {
-    name: 'AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT'
+    name: 'CDSS_AZURE_OPENAI_MINI_DEPLOYMENT_NAME'
     value: gpt4oMiniDeploymentName
   }
   {
-    name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
+    name: 'CDSS_AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
     value: embeddingDeploymentName
   }
   {
-    name: 'AZURE_SEARCH_ENDPOINT'
+    name: 'CDSS_AZURE_OPENAI_API_VERSION'
+    value: '2024-12-01-preview'
+  }
+  {
+    name: 'CDSS_AZURE_SEARCH_ENDPOINT'
     value: 'https://${aiSearch.name}.search.windows.net'
   }
   {
-    name: 'AZURE_SEARCH_API_KEY'
+    name: 'CDSS_AZURE_SEARCH_API_KEY'
     secretRef: 'search-api-key'
   }
   {
-    name: 'AZURE_COSMOS_ENDPOINT'
+    name: 'CDSS_AZURE_SEARCH_PATIENT_RECORDS_INDEX'
+    value: 'patient-records'
+  }
+  {
+    name: 'CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_INDEX'
+    value: 'treatment-protocols'
+  }
+  {
+    name: 'CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX'
+    value: 'medical-literature-cache'
+  }
+  {
+    name: 'CDSS_AZURE_SEARCH_PATIENT_RECORDS_SEMANTIC_CONFIG'
+    value: 'patient-records-semantic'
+  }
+  {
+    name: 'CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_SEMANTIC_CONFIG'
+    value: 'protocols-semantic'
+  }
+  {
+    name: 'CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_SEMANTIC_CONFIG'
+    value: 'literature-semantic'
+  }
+  {
+    name: 'CDSS_AZURE_COSMOS_ENDPOINT'
     value: cosmosAccount.properties.documentEndpoint
   }
   {
-    name: 'AZURE_COSMOS_CONNECTION_STRING'
-    secretRef: 'cosmos-connection-string'
+    name: 'CDSS_AZURE_COSMOS_USE_ENTRA_ID'
+    value: environment == 'prod' ? 'true' : 'false'
   }
   {
-    name: 'AZURE_COSMOS_DATABASE'
+    name: 'CDSS_AZURE_COSMOS_DATABASE_NAME'
     value: cosmosDatabaseName
   }
   {
-    name: 'AZURE_DOC_INTELLIGENCE_ENDPOINT'
+    name: 'CDSS_AZURE_COSMOS_PATIENT_PROFILES_CONTAINER'
+    value: 'patient-profiles'
+  }
+  {
+    name: 'CDSS_AZURE_COSMOS_CONVERSATION_HISTORY_CONTAINER'
+    value: 'conversation-history'
+  }
+  {
+    name: 'CDSS_AZURE_COSMOS_EMBEDDING_CACHE_CONTAINER'
+    value: 'embedding-cache'
+  }
+  {
+    name: 'CDSS_AZURE_COSMOS_AUDIT_LOG_CONTAINER'
+    value: 'audit-log'
+  }
+  {
+    name: 'CDSS_AZURE_COSMOS_AGENT_STATE_CONTAINER'
+    value: 'agent-state'
+  }
+  {
+    name: 'CDSS_AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT'
     value: documentIntelligence.properties.endpoint
   }
   {
-    name: 'AZURE_DOC_INTELLIGENCE_KEY'
+    name: 'CDSS_AZURE_DOCUMENT_INTELLIGENCE_KEY'
     secretRef: 'doc-intelligence-key'
   }
   {
-    name: 'AZURE_STORAGE_ENDPOINT'
-    value: storageBlobEndpoint
-  }
-  {
-    name: 'AZURE_STORAGE_USE_ENTRA_ID'
-    value: environment == 'prod' ? 'true' : 'false'
+    name: 'CDSS_AZURE_BLOB_PROTOCOLS_CONTAINER'
+    value: 'treatment-protocols'
   }
   {
     name: 'CDSS_AZURE_BLOB_ENDPOINT'
@@ -1380,20 +1565,60 @@ var containerAppBaseEnv = [
     value: environment == 'prod' ? 'true' : 'false'
   }
   {
-    name: 'REDIS_CONNECTION_STRING'
-    secretRef: 'redis-connection-string'
+    name: 'CDSS_REDIS_URL'
+    secretRef: 'redis-url'
   }
   {
-    name: 'AZURE_KEY_VAULT_URI'
+    name: 'CDSS_AZURE_KEY_VAULT_URL'
     value: keyVault.properties.vaultUri
   }
   {
-    name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-    value: appInsights.properties.ConnectionString
+    name: 'CDSS_CORS_ORIGINS'
+    value: string(corsAllowedOrigins)
+  }
+  {
+    name: 'CDSS_CORS_ALLOW_METHODS'
+    value: '["GET","POST","PUT","PATCH","DELETE","OPTIONS"]'
+  }
+  {
+    name: 'CDSS_CORS_ALLOW_HEADERS'
+    value: '["Authorization","Content-Type","X-Request-ID"]'
+  }
+  {
+    name: 'CDSS_CORS_EXPOSE_HEADERS'
+    value: '["X-Request-ID","X-Trace-ID"]'
+  }
+  {
+    name: 'CDSS_CORS_ALLOW_CREDENTIALS'
+    value: 'true'
+  }
+  {
+    name: 'CDSS_AUTH_ENABLED'
+    value: string(authEnabled)
+  }
+  {
+    name: 'CDSS_AUTH_TENANT_ID'
+    value: subscription().tenantId
+  }
+  {
+    name: 'CDSS_AUTH_AUDIENCE'
+    value: authAudience
+  }
+  {
+    name: 'CDSS_AUTH_REQUIRED_SCOPES'
+    value: string(authRequiredScopes)
+  }
+  {
+    name: 'CDSS_LOG_LEVEL'
+    value: environment == 'prod' ? 'INFO' : 'DEBUG'
   }
   {
     name: 'AZURE_CLIENT_ID'
     value: managedIdentity.properties.clientId
+  }
+  {
+    name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+    value: appInsights.properties.ConnectionString
   }
 ]
 
@@ -1401,8 +1626,8 @@ var containerAppEnvVars = environment == 'prod'
   ? containerAppBaseEnv
   : concat(containerAppBaseEnv, [
       {
-        name: 'AZURE_STORAGE_CONNECTION_STRING'
-        secretRef: 'storage-connection-string'
+        name: 'CDSS_AZURE_COSMOS_KEY'
+        secretRef: 'cosmos-primary-key'
       }
       {
         name: 'CDSS_AZURE_BLOB_CONNECTION_STRING'
@@ -1430,18 +1655,19 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 8000
         transport: 'auto'
         corsPolicy: {
-          allowedOrigins: [
-            '*'
-          ]
+          allowedOrigins: corsAllowedOrigins
           allowedMethods: [
             'GET'
             'POST'
             'PUT'
+            'PATCH'
             'DELETE'
             'OPTIONS'
           ]
           allowedHeaders: [
-            '*'
+            'Authorization'
+            'Content-Type'
+            'X-Request-ID'
           ]
           maxAge: 3600
         }
@@ -1524,10 +1750,11 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   dependsOn: [
     kvSecretsUserRole
     cosmosConnectionStringSecret
+    cosmosPrimaryKeySecret
     searchApiKeySecret
     openaiApiKeySecret
     docIntelligenceKeySecret
-    redisConnectionStringSecret
+    redisUrlSecret
     storageConnectionStringSecret
   ]
 }
@@ -1563,7 +1790,7 @@ resource staticWebAppConfig 'Microsoft.Web/staticSites/config@2023-01-01' = if (
   name: 'appsettings'
   properties: {
     VITE_USE_MOCK_API: 'false'
-    VITE_API_BASE_URL: containerApp.properties.configuration.ingress.fqdn
+    VITE_API_BASE_URL: 'https://${containerApp.properties.configuration.ingress.fqdn}'
     VITE_AZURE_CLIENT_ID: ''
     VITE_AZURE_TENANT_ID: subscription().tenantId
   }
