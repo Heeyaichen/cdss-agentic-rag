@@ -327,20 +327,108 @@ pip install -e ".[dev]"
 # Login to Azure
 az login
 
-# Deploy to production environment
-./infra/scripts/deploy.sh prod cdss-prod-rg
+# # Deploy to production environment
+# ./infra/scripts/deploy.sh prod cdss-prod-rg
 
-# Optional: expose prod API publicly (for public Static Web App/browser access)
+# 1) Create (or use existing) ACR
+ACR_NAME=cdssacr
+az acr create -n "$ACR_NAME" -g cdss-prod-rg -l eastus2 --sku Standard
+
+# 2) Build and push real backend image
+IMAGE_TAG=2026.03.14.1
+az acr login -n "$ACR_NAME"
+
+docker buildx create --name cdssbuilder --use 2>/dev/null || docker buildx use cdssbuilder
+docker buildx inspect --bootstrap
+docker buildx build --platform linux/amd64 \
+  -t "$ACR_NAME.azurecr.io/cdss-api:$IMAGE_TAG" \
+  --push .
+
+# 2) Verify tag exists in ACR
+az acr repository show --name "$ACR_NAME" --image "cdss-api:$IMAGE_TAG" -o table
+
+# 3) Deploy infra+app using real image + MI pull
+CONTAINER_IMAGE="$ACR_NAME.azurecr.io/cdss-api:$IMAGE_TAG" \
+ACR_NAME="$ACR_NAME" \
 ./infra/scripts/deploy.sh prod cdss-prod-rg eastus2 true
 
-# Populate Environment Files from Azure Resources
-./infra/scripts/populate-env.sh cdss-prod-rg
+# Optional: expose prod API publicly (for public Static Web App/browser access)
+# ./infra/scripts/deploy.sh prod cdss-prod-rg eastus2 true
 
-# Seed sample data from inside Azure network (recommended for prod)
-./infra/scripts/seed-data-infra-network.sh cdss-prod-rg
+RG=cdss-prod-rg
+SEARCH_NAME=$(az search service list -g "$RG" --query "[0].name" -o tsv)
+
+# Temporarily allow public access
+az search service update -g "$RG" -n "$SEARCH_NAME" --public-network-access enabled
+
+az search service show -g "$RG" -n "$SEARCH_NAME" \
+  --query "{provisioningState:provisioningState,publicNetworkAccess:publicNetworkAccess}" -o table
+
+# Create/update indexes
+./infra/scripts/create-search-indexes.sh "$RG" "$SEARCH_NAME"
+
+# Lock it back down
+az search service update -g "$RG" -n "$SEARCH_NAME" --public-network-access disabled
+
+# 0) Set variables
+RG=cdss-prod-rg
+APP=$(az containerapp list -g "$RG" --query "[?contains(name,'-api')].name | [0]" -o tsv)
+
+API_FQDN=$(az containerapp show -g "$RG" -n "$APP" --query properties.configuration.ingress.fqdn -o tsv)
+
+# 1) Backend verification
+az containerapp show -g "$RG" -n "$APP" --query "{state:properties.provisioningState,fqdn:properties.configuration.ingress.fqdn}" -o table
+curl -s -o /dev/null -w "%{http_code}\n" "https://$API_FQDN/api/v1/health"
+az containerapp logs show -g "$RG" -n "$APP" --tail 50
+
+# 2) Generate local env files for scripts/tools
+./infra/scripts/populate-env.sh "$RG"
+
+# 3) Seed sample data for E2E (prod-safe path)
+./infra/scripts/seed-data-infra-network.sh "$RG"
+
+# 4) Allow your browser origin for frontend->backend calls
+az containerapp ingress cors update -g "$RG" -n "$APP" \
+  --allowed-origins http://localhost:3000 https://localhost:3000 http://localhost:3001 https://localhost:3001
+
+# Verify API auth env vars (enabled flag, JWT audience, required scopes) before configuring frontend MSAL scope
+az containerapp show -g "$RG" -n "$APP" \
+  --query "properties.template.containers[0].env[?name=='CDSS_AUTH_ENABLED'||name=='CDSS_AUTH_AUDIENCE'||name=='CDSS_AUTH_REQUIRED_SCOPES'].[name,value]" \
+  -o table
+
+# 5) Configure Entra SPA auth + frontend runtime in one step
+#    This script now automates:
+#    - SPA app registration discovery/creation
+#    - SPA redirect URI configuration
+#    - API app discovery/creation
+#    - API audience auto-alignment from backend CDSS_AUTH_AUDIENCE (when available)
+#    - API scope discovery/creation
+#    - SPA delegated permission assignment
+#    - admin consent (unless --skip-admin-consent)
+#    - frontend/.env.local generation
+./infra/scripts/setup-entra-spa-auth.sh \
+  --resource-group "$RG" \
+  --container-app-name "$APP"
+
+# Optional if you do not have tenant admin permissions yet:
+# ./infra/scripts/setup-entra-spa-auth.sh --resource-group "$RG" --container-app-name "$APP" --skip-admin-consent
+
+# 6) Run frontend and test in browser
+cd frontend
+npm run dev
+# open http://localhost:3000
+# if Vite reports port 3000 is in use, stop the other process or run:
+#   lsof -i :3000
+# backend docs: https://$API_FQDN/docs
+
+# # Populate Environment Files from Azure Resources
+# ./infra/scripts/populate-env.sh cdss-prod-rg
+
+# # Seed sample data from inside Azure network (recommended for prod)
+# ./infra/scripts/seed-data-infra-network.sh cdss-prod-rg
 
 # Local seeding (works best for dev/staging where public access is allowed)
-python infra/scripts/seed_data.py --environment dev
+# python infra/scripts/seed_data.py --environment dev
 ```
 
 ### 5. Run locally
@@ -692,7 +780,7 @@ The application is configured via environment variables. Copy `.env.example` to 
 | `CDSS_PUBMED_API_KEY` | `None` | NCBI API key for higher PubMed rate limits |
 | `CDSS_DRUGBANK_API_KEY` | `None` | DrugBank API key for drug interaction data |
 | `CDSS_LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
-| `CDSS_CORS_ORIGINS` | `["http://localhost:3000"]` | Allowed CORS origins |
+| `CDSS_CORS_ORIGINS` | `["http://localhost:3000","http://localhost:3001"]` | Allowed CORS origins |
 | `CDSS_AUTH_ENABLED` | `false` | Enable Entra ID JWT validation middleware |
 | `CDSS_AUTH_TENANT_ID` | `None` | Entra tenant ID for JWT issuer/JWKS |
 | `CDSS_AUTH_AUDIENCE` | `None` | Entra API audience (Application ID URI/client ID) |
