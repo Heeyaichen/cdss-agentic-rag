@@ -1,21 +1,21 @@
 /**
  * CDSS Shadow/Elevation System
  *
- * 5-level elevation system with subtle, functional shadows for depth.
+ * Uses a 5-level design vocabulary, expanded to the 25-level MUI shadow scale.
  * Includes specialized shadows for clinical alerts and notifications.
  *
  * @module shadows
  */
 
 // ============================================================================
-// BASE SHADOWS (5 LEVELS)
+// BASE SHADOWS (5 DESIGN LEVELS -> 25 MUI LEVELS)
 // ============================================================================
 
 /**
  * Base shadow definitions for elevation hierarchy.
  * Designed for clinical interfaces - subtle but functional.
  */
-export const shadows = [
+const lightShadowBase = [
   // Level 0: No shadow (flat)
   'none',
   
@@ -35,6 +35,14 @@ export const shadows = [
   // Use for: modals, dialogs, floating action buttons
   '0px 8px 16px rgba(0, 0, 0, 0.08), 0px 8px 24px rgba(0, 0, 0, 0.12)',
 ] as const;
+
+function expandMuiShadows(base: readonly string[]): string[] {
+  // MUI components can request elevations up to 24 (e.g., Drawer uses 16).
+  // Repeat the highest designed level for any remaining slots.
+  return Array.from({ length: 25 }, (_, index) => base[Math.min(index, base.length - 1)]);
+}
+
+export const shadows = expandMuiShadows(lightShadowBase);
 
 // ============================================================================
 // CLINICAL ALERT SHADOWS
@@ -66,7 +74,7 @@ export const clinicalShadows = {
  * Shadow definitions optimized for dark mode.
  * Uses lighter, more subtle shadows on dark backgrounds.
  */
-export const darkShadows = [
+const darkShadowBase = [
   // Level 0: No shadow
   'none',
   
@@ -82,6 +90,8 @@ export const darkShadows = [
   // Level 4: High elevation
   '0px 8px 16px rgba(0, 0, 0, 0.25), 0px 8px 24px rgba(0, 0, 0, 0.35)',
 ] as const;
+
+export const darkShadows = expandMuiShadows(darkShadowBase);
 
 // ============================================================================
 // INTERACTIVE STATE SHADOWS

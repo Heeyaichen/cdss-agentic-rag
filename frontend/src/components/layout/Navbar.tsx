@@ -3,6 +3,7 @@ import {
   AppBar,
   Toolbar,
   Typography,
+  Button,
   IconButton,
   Menu,
   MenuItem,
@@ -18,17 +19,15 @@ import {
   Brightness4,
   Brightness7,
   Menu as MenuIcon,
-  AccountCircle,
   Logout,
   Settings,
-  FiberManualRecord,
   Wifi,
   WifiOff,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 
 import { useThemeStore, useUserStore } from '@/stores/userStore';
-import { logout, getActiveAccount } from '@/lib/auth';
+import { login, logout, getActiveAccount } from '@/lib/auth';
 import { NAVBAR_HEIGHT, SIDEBAR_WIDTH } from './AppShell';
 import { spacing, transitions, primary } from '@/theme';
 
@@ -73,6 +72,10 @@ export default function Navbar({
   const handleLogout = async () => {
     handleClose();
     await logout();
+  };
+
+  const handleLogin = async () => {
+    await login();
   };
 
   const statusConfig = {
@@ -185,70 +188,78 @@ export default function Navbar({
             </IconButton>
           </Tooltip>
 
-          <Tooltip title="Account">
-            <IconButton
-              onClick={handleMenu}
-              sx={{
-                ml: spacing[1],
-                p: 0.5,
-                border: `2px solid ${theme.palette.divider}`,
-                '&:hover': {
-                  borderColor: theme.palette.primary.main,
+          {account ? (
+            <Tooltip title="Account">
+              <IconButton
+                onClick={handleMenu}
+                sx={{
+                  ml: spacing[1],
+                  p: 0.5,
+                  border: `2px solid ${theme.palette.divider}`,
+                  '&:hover': {
+                    borderColor: theme.palette.primary.main,
+                  },
+                }}
+              >
+                <Avatar
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    backgroundColor: theme.palette.primary.main,
+                    fontSize: '0.875rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  {initials}
+                </Avatar>
+              </IconButton>
+            </Tooltip>
+          ) : (
+            <Button variant="outlined" size="small" onClick={handleLogin}>
+              Sign in
+            </Button>
+          )}
+
+          {account && (
+            <Menu
+              anchorEl={anchorEl}
+              open={Boolean(anchorEl)}
+              onClose={handleClose}
+              transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+              anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+              PaperProps={{
+                sx: {
+                  mt: 1,
+                  minWidth: 200,
+                  boxShadow: theme.shadows[3],
                 },
               }}
             >
-              <Avatar
-                sx={{
-                  width: 32,
-                  height: 32,
-                  backgroundColor: theme.palette.primary.main,
-                  fontSize: '0.875rem',
-                  fontWeight: 600,
+              <Box sx={{ px: 2, py: 1.5 }}>
+                <Typography variant="subtitle2" fontWeight={600}>
+                  {displayName}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {email}
+                </Typography>
+              </Box>
+              <Divider />
+              <MenuItem
+                onClick={() => {
+                  handleClose();
+                  navigate('/settings');
                 }}
+                sx={{ py: 1.5 }}
               >
-                {initials}
-              </Avatar>
-            </IconButton>
-          </Tooltip>
-
-          <Menu
-            anchorEl={anchorEl}
-            open={Boolean(anchorEl)}
-            onClose={handleClose}
-            transformOrigin={{ horizontal: 'right', vertical: 'top' }}
-            anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
-            PaperProps={{
-              sx: {
-                mt: 1,
-                minWidth: 200,
-                boxShadow: theme.shadows[3],
-              },
-            }}
-          >
-            <Box sx={{ px: 2, py: 1.5 }}>
-              <Typography variant="subtitle2" fontWeight={600}>
-                {displayName}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {email}
-              </Typography>
-            </Box>
-            <Divider />
-            <MenuItem
-              onClick={() => {
-                handleClose();
-                navigate('/settings');
-              }}
-              sx={{ py: 1.5 }}
-            >
-              <Settings sx={{ mr: 1.5, fontSize: 20 }} />
-              Settings
-            </MenuItem>
-            <MenuItem onClick={handleLogout} sx={{ py: 1.5 }}>
-              <Logout sx={{ mr: 1.5, fontSize: 20 }} />
-              Logout
-            </MenuItem>
-          </Menu>
+                <Settings sx={{ mr: 1.5, fontSize: 20 }} />
+                Settings
+              </MenuItem>
+              <MenuItem onClick={handleLogout} sx={{ py: 1.5 }}>
+                <Logout sx={{ mr: 1.5, fontSize: 20 }} />
+                Logout
+              </MenuItem>
+            </Menu>
+          )}
         </Box>
       </Toolbar>
     </AppBar>

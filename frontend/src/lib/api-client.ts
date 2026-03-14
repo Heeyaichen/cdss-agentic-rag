@@ -174,13 +174,7 @@ export function createStreamingConnection(
   patientId?: string,
   sessionId?: string
 ): () => void {
-  const params = new URLSearchParams({
-    query,
-    ...(patientId && { patient_id: patientId }),
-    ...(sessionId && { session_id: sessionId }),
-  });
-
-  const eventSource = new EventSource(`${API_BASE_URL}/v1/query/stream?${params}`);
+  const abortController = new AbortController();
   let closed = false;
 
   const normalizeUpdate = (eventName: string, payload: unknown): StreamingQueryUpdate | null => {
@@ -258,7 +252,7 @@ export function createStreamingConnection(
       return;
     }
     closed = true;
-    eventSource.close();
+    abortController.abort();
     onComplete();
   };
 
@@ -273,25 +267,106 @@ export function createStreamingConnection(
     }
   };
 
-  eventSource.onmessage = (event) => {
-    handleEventPayload('message', event.data);
-  };
+  const processSseChunk = (chunk: string) => {
+    const lines = chunk.split('\n');
+    let eventName = 'message';
+    const dataLines: string[] = [];
 
-  const namedEventTypes = ['processing', 'progress', 'agent_result', 'drug_alerts', 'complete', 'error'] as const;
-  namedEventTypes.forEach((eventName) => {
-    eventSource.addEventListener(eventName, (event) => {
-      const messageEvent = event as MessageEvent<string>;
-      handleEventPayload(eventName, messageEvent.data);
-    });
-  });
-
-  eventSource.onerror = (event) => {
-    if (closed) {
-      return;
+    for (const line of lines) {
+      const normalizedLine = line.replace(/\r$/, '');
+      if (normalizedLine.startsWith('event:')) {
+        eventName = normalizedLine.slice(6).trim();
+      } else if (normalizedLine.startsWith('data:')) {
+        dataLines.push(normalizedLine.slice(5).trimStart());
+      }
     }
-    onError(new Error(event instanceof ErrorEvent ? event.message : 'Connection error'));
-    closeConnection();
+
+    if (dataLines.length > 0) {
+      handleEventPayload(eventName, dataLines.join('\n'));
+    }
   };
+
+  const start = async () => {
+    try {
+      let authHeader: string | undefined;
+      const account = msalInstance.getAllAccounts()[0];
+
+      if (API_SCOPE) {
+        if (!account) {
+          throw new Error('Authentication required. Click Sign in and retry orchestration.');
+        }
+        const response = await msalInstance.acquireTokenSilent({
+          scopes: [API_SCOPE],
+          account,
+        });
+        authHeader = `Bearer ${response.accessToken}`;
+      }
+
+      const response = await fetch(`${API_BASE_URL}/v1/query/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          ...(authHeader ? { Authorization: authHeader } : {}),
+        },
+        body: JSON.stringify({
+          text: query,
+          ...(patientId ? { patient_id: patientId } : {}),
+          ...(sessionId ? { session_id: sessionId } : {}),
+        }),
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        const responseBody = await response.text().catch(() => '');
+        throw new Error(
+          `Streaming request failed (${response.status}). ${responseBody || 'Check auth/CORS configuration.'}`.trim()
+        );
+      }
+
+      if (!response.body) {
+        throw new Error('Streaming response is empty.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() ?? '';
+
+        events.forEach((eventChunk) => {
+          if (!eventChunk.trim()) return;
+          processSseChunk(eventChunk);
+        });
+      }
+
+      if (buffer.trim()) {
+        processSseChunk(buffer);
+      }
+    } catch (error) {
+      if (closed) {
+        return;
+      }
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      onError(error instanceof Error ? error : new Error('Connection error'));
+    } finally {
+      if (!closed) {
+        closeConnection();
+      }
+    }
+  };
+
+  void start();
 
   return () => {
     closeConnection();

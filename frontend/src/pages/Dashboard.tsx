@@ -305,6 +305,26 @@ export default function Dashboard() {
 
   const compact = densityMode === "compact";
   const density = compact ? densityTokens.compact : densityTokens.comfortable;
+  const auditEntries = React.useMemo(() => normalizeAuditEntries(rawAuditData), [rawAuditData]);
+  const trendData: TrendPoint[] = React.useMemo(() => {
+    if (auditEntries.length === 0) return [];
+
+    const baseDays = Array.from({ length: 7 }).map((_, index) => dayjs().subtract(6 - index, "day").format("MMM D"));
+    const seedMap = new Map(baseDays.map((day) => [day, { day, success: 0, failure: 0 }]));
+
+    auditEntries.forEach((entry) => {
+      const dayKey = dayjs(entry.timestamp).format("MMM D");
+      const dayData = seedMap.get(dayKey);
+      if (!dayData) return;
+      if (entry.outcome === "success") {
+        dayData.success += 1;
+      } else {
+        dayData.failure += 1;
+      }
+    });
+
+    return Array.from(seedMap.values());
+  }, [auditEntries]);
 
   if (patientsLoading || healthLoading || auditLoading) {
     return <LoadingBlock compact={compact} />;
@@ -315,8 +335,6 @@ export default function Dashboard() {
   const serviceEntries = Object.entries(services);
   const healthyServiceCount = serviceEntries.filter(([, status]) => status === "healthy").length;
   const healthPct = serviceEntries.length > 0 ? Math.round((healthyServiceCount / serviceEntries.length) * 100) : 0;
-
-  const auditEntries = normalizeAuditEntries(rawAuditData);
 
   const activityFeed: ActivityFeedItem[] = [...auditEntries]
     .sort((a, b) => dayjs(b.timestamp).valueOf() - dayjs(a.timestamp).valueOf())
@@ -398,26 +416,6 @@ export default function Dashboard() {
     agent: agent.agent,
     latency: agent.latency + degradedCount * 45 + (compact ? -20 : 0) + index * 8,
   }));
-
-  const trendData: TrendPoint[] = React.useMemo(() => {
-    if (auditEntries.length === 0) return [];
-
-    const baseDays = Array.from({ length: 7 }).map((_, index) => dayjs().subtract(6 - index, "day").format("MMM D"));
-    const seedMap = new Map(baseDays.map((day) => [day, { day, success: 0, failure: 0 }]));
-
-    auditEntries.forEach((entry) => {
-      const dayKey = dayjs(entry.timestamp).format("MMM D");
-      const dayData = seedMap.get(dayKey);
-      if (!dayData) return;
-      if (entry.outcome === "success") {
-        dayData.success += 1;
-      } else {
-        dayData.failure += 1;
-      }
-    });
-
-    return Array.from(seedMap.values());
-  }, [auditEntries]);
 
   return (
     <Box
