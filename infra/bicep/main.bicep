@@ -25,6 +25,23 @@ param projectName string = 'cdss'
 @description('Container image for the FastAPI application')
 param containerImage string = 'cdssacr.azurecr.io/cdss-api:latest'
 
+@description('Enable managed-identity based private Azure Container Registry (ACR) image pulls.')
+param acrUseManagedIdentity bool = false
+
+@description('Create ACR in this resource group when acrUseManagedIdentity=true.')
+param acrCreate bool = false
+
+@description('ACR name (without domain), required when acrUseManagedIdentity=true. Example: myacr')
+param acrName string = ''
+
+@description('ACR SKU to use when acrCreate=true.')
+@allowed([
+  'Basic'
+  'Standard'
+  'Premium'
+])
+param acrSku string = 'Standard'
+
 @description('Azure OpenAI GPT-4o model deployment name')
 param gpt4oDeploymentName string = 'gpt-4o'
 
@@ -58,6 +75,7 @@ param cosmosDatabaseName string = 'cdss-db'
 @description('Allowed CORS origins for the backend API.')
 param corsAllowedOrigins array = [
   'http://localhost:3000'
+  'http://localhost:3001'
 ]
 
 @description('Enable Azure Entra ID JWT authentication middleware in the API.')
@@ -81,6 +99,9 @@ param tags object = {
 var uniqueSuffix = uniqueString(resourceGroup().id)
 var resourcePrefix = '${projectName}-${environment}'
 var resourcePrefixClean = replace('${projectName}${environment}', '-', '')
+var acrGeneratedName = toLower(take('${resourcePrefixClean}acr${uniqueSuffix}', 50))
+var acrEffectiveName = !empty(acrName) ? toLower(acrName) : acrGeneratedName
+var acrLoginServer = '${acrEffectiveName}.azurecr.io'
 
 // Networking
 var vnetName = '${resourcePrefix}-vnet'
@@ -103,6 +124,7 @@ var logAnalyticsName = '${resourcePrefix}-logs'
 var appInsightsName = '${resourcePrefix}-insights'
 var containerAppEnvName = '${resourcePrefix}-cae'
 var containerAppName = '${resourcePrefix}-api'
+var staticWebAppName = '${resourcePrefix}-frontend'
 var openaiName = '${resourcePrefixClean}oai${uniqueSuffix}'
 var aiSearchName = '${resourcePrefix}-search-${uniqueSuffix}'
 var docIntelligenceName = '${resourcePrefix}-docintel-${uniqueSuffix}'
@@ -509,14 +531,15 @@ resource openai 'Microsoft.CognitiveServices/accounts@2024-04-01-preview' = {
   sku: {
     name: 'S0'
   }
-  properties: {
-    restore: openaiRestore
+  properties: union({
     customSubDomainName: openaiName
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
     networkAcls: {
       defaultAction: environment == 'prod' ? 'Deny' : 'Allow'
     }
-  }
+  }, openaiRestore ? {
+    restore: true
+  } : {})
 }
 
 resource gpt4oDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-04-01-preview' = {
@@ -611,14 +634,15 @@ resource documentIntelligence 'Microsoft.CognitiveServices/accounts@2024-04-01-p
   sku: {
     name: environment == 'prod' ? 'S0' : 'S0'
   }
-  properties: {
-    restore: docIntelRestore
+  properties: union({
     customSubDomainName: docIntelligenceName
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
     networkAcls: {
       defaultAction: environment == 'prod' ? 'Deny' : 'Allow'
     }
-  }
+  }, docIntelRestore ? {
+    restore: true
+  } : {})
 }
 
 // ============================================================================
@@ -1116,11 +1140,28 @@ resource storageConnectionStringSecret 'Microsoft.KeyVault/vaults/secrets@2023-0
   parent: keyVault
   name: 'storage-connection-string'
   properties: {
-    value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
+    value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=${az.environment().suffixes.storage}'
   }
 }
 
 // --- RBAC Role Assignments ---
+
+resource acrRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = if (acrUseManagedIdentity && acrCreate) {
+  name: acrEffectiveName
+  location: location
+  tags: tags
+  sku: {
+    name: acrSku
+  }
+  properties: {
+    adminUserEnabled: false
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource acrRegistryExisting 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = if (acrUseManagedIdentity && !acrCreate) {
+  name: acrEffectiveName
+}
 
 // Key Vault Secrets User for Managed Identity
 resource kvSecretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -1173,6 +1214,34 @@ resource cosmosDataContributorRole 'Microsoft.DocumentDB/databaseAccounts/sqlRol
   properties: {
     roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002' // Cosmos DB Built-in Data Contributor
     principalId: managedIdentity.properties.principalId
+    scope: cosmosAccount.id
+  }
+}
+
+// AcrPull role for managed identity (required for private ACR image pulls).
+resource acrPullRoleOnCreatedAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (acrUseManagedIdentity && acrCreate) {
+  name: guid(acrRegistry.id, managedIdentity.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  scope: acrRegistry
+  properties: {
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+    ) // AcrPull
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource acrPullRoleOnExistingAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (acrUseManagedIdentity && !acrCreate) {
+  name: guid(acrRegistryExisting.id, managedIdentity.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  scope: acrRegistryExisting
+  properties: {
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+    ) // AcrPull
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -1406,7 +1475,7 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-var storageBlobEndpoint = 'https://${storageAccount.name}.blob.core.windows.net/'
+var storageBlobEndpoint = 'https://${storageAccount.name}.blob.${az.environment().suffixes.storage}/'
 
 var containerAppBaseSecrets = [
   {
@@ -1650,6 +1719,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Multiple'
+      registries: acrUseManagedIdentity ? [
+        {
+          server: acrLoginServer
+          identity: managedIdentity.id
+        }
+      ] : []
       ingress: {
         external: true
         targetPort: 8000
@@ -1748,6 +1823,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     }
   }
   dependsOn: [
+    acrPullRoleOnCreatedAcr
+    acrPullRoleOnExistingAcr
     kvSecretsUserRole
     cosmosConnectionStringSecret
     cosmosPrimaryKeySecret
@@ -1766,7 +1843,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 // ============================================================================
 
 resource staticWebApp 'Microsoft.Web/staticSites@2023-01-01' = if (environment != 'prod') {
-  name: '${resourcePrefix}-frontend'
+  name: staticWebAppName
   location: location
   tags: tags
   sku: {
@@ -1877,9 +1954,9 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
             {
               "name": "patient-records-semantic",
               "prioritizedFields": {
-                "contentFields": [{"fieldName": "content"}],
-                "titleFields": [{"fieldName": "document_type"}],
-                "keywordsFields": [{"fieldName": "entity_names"}]
+                "titleField": {"fieldName": "document_type"},
+                "prioritizedContentFields": [{"fieldName": "content"}],
+                "prioritizedKeywordsFields": [{"fieldName": "entity_names"}]
               }
             }
           ]
@@ -1917,9 +1994,9 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
             {
               "name": "protocols-semantic",
               "prioritizedFields": {
-                "contentFields": [{"fieldName": "content"}],
-                "titleFields": [{"fieldName": "guideline_name"}],
-                "keywordsFields": [{"fieldName": "specialty"}]
+                "titleField": {"fieldName": "guideline_name"},
+                "prioritizedContentFields": [{"fieldName": "content"}],
+                "prioritizedKeywordsFields": [{"fieldName": "specialty"}]
               }
             }
           ]
@@ -1958,9 +2035,9 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
             {
               "name": "literature-semantic",
               "prioritizedFields": {
-                "contentFields": [{"fieldName": "content"}],
-                "titleFields": [{"fieldName": "title"}],
-                "keywordsFields": [{"fieldName": "mesh_terms"}]
+                "titleField": {"fieldName": "title"},
+                "prioritizedContentFields": [{"fieldName": "content"}],
+                "prioritizedKeywordsFields": [{"fieldName": "mesh_terms"}]
               }
             }
           ]
@@ -2086,7 +2163,7 @@ output backendApiExposureMode string = apiExposureMode
 output containerAppEnvironmentIsInternal bool = containerAppEnvironmentInternal
 
 @description('Static Web App URL (Frontend)')
-output staticWebAppUrl string = environment != 'prod' ? 'https://${staticWebApp.properties.defaultHostname}' : ''
+output staticWebAppUrl string = environment != 'prod' ? 'https://${staticWebAppName}.azurestaticapps.net' : ''
 
 @description('Static Web App name')
 output staticWebAppName string = environment != 'prod' ? staticWebApp.name : ''
@@ -2108,6 +2185,12 @@ output docIntelligenceEndpoint string = documentIntelligence.properties.endpoint
 
 @description('Redis hostname')
 output redisHostname string = redis.properties.hostName
+
+@description('ACR name used for container image pulls when managed identity is enabled')
+output acrName string = acrUseManagedIdentity ? acrEffectiveName : ''
+
+@description('ACR login server used for container image pulls when managed identity is enabled')
+output acrLoginServer string = acrUseManagedIdentity ? acrLoginServer : ''
 
 @description('VNet ID')
 output vnetId string = vnet.id
