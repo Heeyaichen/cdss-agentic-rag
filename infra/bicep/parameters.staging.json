@@ -6,7 +6,7 @@
       "value": "eastus2"
     },
     "environment": {
-      "value": "dev"
+      "value": "staging"
     },
     "projectName": {
       "value": "cdss"
@@ -28,25 +28,28 @@
     },
     "corsAllowedOrigins": {
       "value": [
+        "https://staging-cdss-frontend.example.com",
         "http://localhost:3000"
       ]
     },
     "authEnabled": {
-      "value": false
+      "value": true
     },
     "authAudience": {
-      "value": ""
+      "value": "api://cdss-api-staging"
     },
     "authRequiredScopes": {
-      "value": []
+      "value": [
+        "access_as_user"
+      ]
     },
     "tags": {
       "value": {
         "project": "cdss-agentic-rag",
-        "environment": "dev",
+        "environment": "staging",
         "managedBy": "bicep",
         "team": "clinical-ai",
-        "costCenter": "research"
+        "costCenter": "pre-production"
       }
     }
   }

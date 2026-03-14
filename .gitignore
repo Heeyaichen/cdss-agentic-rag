@@ -69,6 +69,7 @@ local.settings.json
 
 # ----- Azure -----
 .azure/
+.azure-tmp/
 azuredeploy.parameters.local.json
 *.env.azure
 .env.azure
@@ -122,8 +123,10 @@ data/
 *.tmp
 *.temp
 .scratch/
+.sisyphus/
 tmp/
 temp/
+cdss_azure_deployment.txt
 
 # ----- Node.js / Frontend -----
 node_modules/

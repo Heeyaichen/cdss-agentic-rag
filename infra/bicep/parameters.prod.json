@@ -38,6 +38,22 @@
     "cosmosDatabaseName": {
       "value": "cdss-db"
     },
+    "corsAllowedOrigins": {
+      "value": [
+        "https://cdss-frontend.example.com"
+      ]
+    },
+    "authEnabled": {
+      "value": true
+    },
+    "authAudience": {
+      "value": "api://cdss-api"
+    },
+    "authRequiredScopes": {
+      "value": [
+        "access_as_user"
+      ]
+    },
     "tags": {
       "value": {
         "project": "cdss-agentic-rag",
