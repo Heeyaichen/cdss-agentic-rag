@@ -89,10 +89,76 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BICEP_DIR="${SCRIPT_DIR}/../bicep"
 BICEP_FILE="${BICEP_DIR}/main.bicep"
 PARAMS_FILE="${BICEP_DIR}/parameters.${ENVIRONMENT}.json"
+CREATE_INDEX_SCRIPT="${SCRIPT_DIR}/create-search-indexes.sh"
 DEPLOYMENT_NAME="cdss-${ENVIRONMENT}-$(date +%Y%m%d%H%M%S)"
 EXTRA_BICEP_PARAMS=""
 OPENAI_RESTORE_ENABLED="false"
 DOCINTEL_RESTORE_ENABLED="false"
+
+get_deployment_output() {
+    local output_name="$1"
+    az deployment group show \
+        --name "${DEPLOYMENT_NAME}" \
+        --resource-group "${RESOURCE_GROUP}" \
+        --query "properties.outputs.${output_name}.value" \
+        --output tsv 2>/dev/null || true
+}
+
+validate_private_networking() {
+    local failures=0
+
+    local openai_pna
+    openai_pna=$(az cognitiveservices account show -n "${OPENAI_NAME}" -g "${RESOURCE_GROUP}" --query "properties.publicNetworkAccess" -o tsv 2>/dev/null || echo "")
+    if [[ "${openai_pna}" != "Disabled" ]]; then
+        log_error "OpenAI public network access is not disabled (current: ${openai_pna:-unknown})."
+        failures=$((failures + 1))
+    fi
+
+    local docintel_pna
+    docintel_pna=$(az cognitiveservices account show -n "${DOCINTEL_NAME}" -g "${RESOURCE_GROUP}" --query "properties.publicNetworkAccess" -o tsv 2>/dev/null || echo "")
+    if [[ "${docintel_pna}" != "Disabled" ]]; then
+        log_error "Document Intelligence public network access is not disabled (current: ${docintel_pna:-unknown})."
+        failures=$((failures + 1))
+    fi
+
+    local cosmos_pna
+    cosmos_pna=$(az cosmosdb show -n "${COSMOS_NAME}" -g "${RESOURCE_GROUP}" --query "publicNetworkAccess" -o tsv 2>/dev/null || echo "")
+    if [[ "${cosmos_pna}" != "Disabled" ]]; then
+        log_error "Cosmos DB public network access is not disabled (current: ${cosmos_pna:-unknown})."
+        failures=$((failures + 1))
+    fi
+
+    local search_pna
+    search_pna=$(az search service show --name "${SEARCH_NAME}" --resource-group "${RESOURCE_GROUP}" --query "publicNetworkAccess" -o tsv 2>/dev/null || echo "")
+    if [[ "${search_pna}" != "disabled" ]]; then
+        log_error "AI Search public network access is not disabled (current: ${search_pna:-unknown})."
+        failures=$((failures + 1))
+    fi
+
+    local openai_pe_count
+    openai_pe_count=$(az network private-endpoint list -g "${RESOURCE_GROUP}" \
+        --query "[?contains(properties.privateLinkServiceConnections[0].properties.privateLinkServiceId, 'Microsoft.CognitiveServices/accounts/${OPENAI_NAME}')] | length(@)" \
+        -o tsv 2>/dev/null || echo "0")
+    if [[ "${openai_pe_count}" -lt 1 ]]; then
+        log_error "OpenAI private endpoint not found."
+        failures=$((failures + 1))
+    fi
+
+    local docintel_pe_count
+    docintel_pe_count=$(az network private-endpoint list -g "${RESOURCE_GROUP}" \
+        --query "[?contains(properties.privateLinkServiceConnections[0].properties.privateLinkServiceId, 'Microsoft.CognitiveServices/accounts/${DOCINTEL_NAME}')] | length(@)" \
+        -o tsv 2>/dev/null || echo "0")
+    if [[ "${docintel_pe_count}" -lt 1 ]]; then
+        log_error "Document Intelligence private endpoint not found."
+        failures=$((failures + 1))
+    fi
+
+    if [[ "${failures}" -gt 0 ]]; then
+        return 1
+    fi
+
+    return 0
+}
 
 # --- Preflight checks ---
 log_info "Running preflight checks..."
@@ -114,6 +180,7 @@ log_info "Azure account: ${ACCOUNT}"
 # Check subscription
 SUBSCRIPTION_ID=$(az account show --query "id" -o tsv)
 SUBSCRIPTION_NAME=$(az account show --query "name" -o tsv)
+TENANT_ID=$(az account show --query "tenantId" -o tsv)
 log_info "Subscription: ${SUBSCRIPTION_NAME} (${SUBSCRIPTION_ID})"
 
 # Check Bicep file exists
@@ -356,6 +423,7 @@ SEARCH_NAME=$(az search service list -g "$RESOURCE_GROUP" --query "[0].name" -o 
 OPENAI_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='OpenAI'].name" -o tsv 2>/dev/null || echo "")
 DOCINTEL_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='FormRecognizer'].name" -o tsv 2>/dev/null || echo "")
 STORAGE_NAME=$(az storage account list -g "$RESOURCE_GROUP" --query "[?tags.project=='cdss-agentic-rag'].name" -o tsv 2>/dev/null | head -1 || echo "")
+REDIS_NAME=$(az redis list -g "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null || echo "")
 
 # Get endpoints
 COSMOS_ENDPOINT=$(az cosmosdb show -n "$COSMOS_NAME" -g "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || echo "N/A")
@@ -369,6 +437,45 @@ SEARCH_KEY=$(az search admin-key show --service-name "$SEARCH_NAME" -g "$RESOURC
 OPENAI_KEY=$(az cognitiveservices account keys list -n "$OPENAI_NAME" -g "$RESOURCE_GROUP" --query key1 -o tsv 2>/dev/null || echo "")
 DOCINTEL_KEY=$(az cognitiveservices account keys list -n "$DOCINTEL_NAME" -g "$RESOURCE_GROUP" --query key1 -o tsv 2>/dev/null || echo "")
 STORAGE_CONN=$(az storage account show-connection-string -n "$STORAGE_NAME" -g "$RESOURCE_GROUP" --query connectionString -o tsv 2>/dev/null || echo "")
+STORAGE_ENDPOINT=$(az storage account show -n "$STORAGE_NAME" -g "$RESOURCE_GROUP" --query primaryEndpoints.blob -o tsv 2>/dev/null || echo "")
+REDIS_KEY=$(az redis list-keys -n "$REDIS_NAME" -g "$RESOURCE_GROUP" --query primaryKey -o tsv 2>/dev/null || echo "")
+REDIS_HOST=$(az redis show -n "$REDIS_NAME" -g "$RESOURCE_GROUP" --query hostName -o tsv 2>/dev/null || echo "")
+
+REDIS_URL=""
+if [[ -n "${REDIS_KEY}" && -n "${REDIS_HOST}" ]]; then
+    REDIS_URL="rediss://:${REDIS_KEY}@${REDIS_HOST}:6380/0"
+fi
+if [[ -z "${REDIS_URL}" ]]; then
+    REDIS_URL="redis://localhost:6379/0"
+fi
+
+# Deployment outputs
+KEY_VAULT_URI=$(get_deployment_output "keyVaultUri")
+CONTAINER_APP_URL=$(get_deployment_output "containerAppUrl")
+APP_INSIGHTS_KEY=$(get_deployment_output "appInsightsKey")
+MANAGED_IDENTITY_ID=$(get_deployment_output "managedIdentityClientId")
+
+if [[ -z "${CONTAINER_APP_URL}" ]]; then
+    CONTAINER_APP_URL="https://$(get_deployment_output "backendUrl")"
+fi
+
+if [[ ! -f "${CREATE_INDEX_SCRIPT}" ]]; then
+    log_error "Search index provisioning script not found: ${CREATE_INDEX_SCRIPT}"
+    exit 1
+fi
+
+log_info "Ensuring Azure AI Search indexes exist..."
+chmod +x "${CREATE_INDEX_SCRIPT}"
+"${CREATE_INDEX_SCRIPT}" "${RESOURCE_GROUP}" "${SEARCH_NAME}"
+
+if [[ "${ENVIRONMENT}" == "prod" ]]; then
+    log_info "Validating private endpoint/network settings for production..."
+    if ! validate_private_networking; then
+        log_error "Production private networking validation failed."
+        exit 1
+    fi
+    log_success "Production private networking validation passed."
+fi
 
 echo ""
 log_success "============================================"
@@ -398,13 +505,18 @@ if [[ "$ENVIRONMENT" == "dev" ]]; then
     log_info "Writing .env.azure for seed-data.sh..."
     cat > "$ENV_AZURE" <<EOF
 ENVIRONMENT=${ENVIRONMENT}
-AZURE_COSMOS_ENDPOINT=${COSMOS_ENDPOINT}
-AZURE_COSMOS_DATABASE=cdss-db
-AZURE_SEARCH_ENDPOINT=${SEARCH_ENDPOINT}
-AZURE_OPENAI_ENDPOINT=${OPENAI_ENDPOINT}
-AZURE_OPENAI_GPT4O_DEPLOYMENT=gpt-4o
-AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT=gpt-4o-mini
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+CDSS_AZURE_COSMOS_ENDPOINT=${COSMOS_ENDPOINT}
+CDSS_AZURE_COSMOS_DATABASE_NAME=cdss-db
+CDSS_AZURE_COSMOS_KEY=${COSMOS_KEY}
+CDSS_AZURE_COSMOS_USE_ENTRA_ID=false
+CDSS_AZURE_SEARCH_ENDPOINT=${SEARCH_ENDPOINT}
+CDSS_AZURE_OPENAI_ENDPOINT=${OPENAI_ENDPOINT}
+CDSS_AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
+CDSS_AZURE_OPENAI_MINI_DEPLOYMENT_NAME=gpt-4o-mini
+CDSS_AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+CDSS_AZURE_BLOB_ENDPOINT=${STORAGE_ENDPOINT}
+CDSS_AZURE_BLOB_CONNECTION_STRING=${STORAGE_CONN}
+CDSS_AZURE_BLOB_USE_ENTRA_ID=false
 EOF
     log_success "Created ${ENV_AZURE}"
     
@@ -431,7 +543,10 @@ CDSS_AZURE_SEARCH_ENDPOINT=${SEARCH_ENDPOINT}
 CDSS_AZURE_SEARCH_API_KEY=${SEARCH_KEY}
 CDSS_AZURE_SEARCH_PATIENT_RECORDS_INDEX=patient-records
 CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_INDEX=treatment-protocols
-CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX=medical-literature
+CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX=medical-literature-cache
+CDSS_AZURE_SEARCH_PATIENT_RECORDS_SEMANTIC_CONFIG=patient-records-semantic
+CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_SEMANTIC_CONFIG=protocols-semantic
+CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_SEMANTIC_CONFIG=literature-semantic
 
 # ── Azure Cosmos DB ───────────────────────────────────────────────────────────
 CDSS_AZURE_COSMOS_ENDPOINT=${COSMOS_ENDPOINT}
@@ -450,7 +565,10 @@ CDSS_AZURE_DOCUMENT_INTELLIGENCE_KEY=${DOCINTEL_KEY}
 
 # ── Azure Blob Storage ───────────────────────────────────────────────────────
 CDSS_AZURE_BLOB_CONNECTION_STRING=${STORAGE_CONN}
-CDSS_AZURE_BLOB_PROTOCOLS_CONTAINER=protocols
+CDSS_AZURE_BLOB_ENDPOINT=${STORAGE_ENDPOINT}
+CDSS_AZURE_BLOB_USE_ENTRA_ID=false
+CDSS_AZURE_BLOB_PROTOCOLS_CONTAINER=treatment-protocols
+CDSS_AZURE_KEY_VAULT_URL=${KEY_VAULT_URI}
 
 # ── PubMed / NCBI Entrez ─────────────────────────────────────────────────────
 CDSS_PUBMED_API_KEY=
@@ -468,12 +586,20 @@ CDSS_DRUGBANK_API_KEY=
 CDSS_DRUGBANK_BASE_URL=https://api.drugbank.com/v1
 
 # ── Redis ────────────────────────────────────────────────────────────────────
-CDSS_REDIS_URL=redis://localhost:6379/0
+CDSS_REDIS_URL=${REDIS_URL}
 
 # ── Application Settings ─────────────────────────────────────────────────────
 CDSS_DEBUG=false
 CDSS_LOG_LEVEL=INFO
 CDSS_CORS_ORIGINS=["http://localhost:3000"]
+CDSS_CORS_ALLOW_METHODS=["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
+CDSS_CORS_ALLOW_HEADERS=["Authorization","Content-Type","X-Request-ID"]
+CDSS_CORS_EXPOSE_HEADERS=["X-Request-ID","X-Trace-ID"]
+CDSS_CORS_ALLOW_CREDENTIALS=true
+CDSS_AUTH_ENABLED=false
+CDSS_AUTH_TENANT_ID=${TENANT_ID}
+CDSS_AUTH_AUDIENCE=
+CDSS_AUTH_REQUIRED_SCOPES=[]
 CDSS_MAX_CONCURRENT_AGENTS=10
 CDSS_RESPONSE_TIMEOUT_SECONDS=30
 CDSS_CONFIDENCE_THRESHOLD=0.6

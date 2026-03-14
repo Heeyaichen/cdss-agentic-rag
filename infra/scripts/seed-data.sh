@@ -19,13 +19,21 @@ else
     exit 1
 fi
 
-COSMOS_ACCOUNT=$(echo $AZURE_COSMOS_ENDPOINT | sed 's|https://||' | sed 's|.documents.azure.com.*||')
+COSMOS_DATABASE_NAME="${CDSS_AZURE_COSMOS_DATABASE_NAME:-cdss-db}"
+COSMOS_ENDPOINT="${CDSS_AZURE_COSMOS_ENDPOINT:-}"
+
+if [[ -z "${COSMOS_ENDPOINT}" ]]; then
+    echo "CDSS_AZURE_COSMOS_ENDPOINT is not set in .env.azure"
+    exit 1
+fi
+
+COSMOS_ACCOUNT=$(echo "${COSMOS_ENDPOINT}" | sed 's|https://||' | sed 's|.documents.azure.com.*||')
 
 # 1. Upload patient data to Cosmos DB
 echo "Uploading patient profile to Cosmos DB..."
 az cosmosdb sql container item upsert \
     --account-name "${COSMOS_ACCOUNT}" \
-    --database-name cdss-db \
+    --database-name "${COSMOS_DATABASE_NAME}" \
     --container-name patient-profiles \
     --partition-key-value "patient_12345" \
     --body @"${SAMPLE_DATA_DIR}/sample_patient.json"

@@ -190,18 +190,28 @@ patient = decode_json("${PATIENT_JSON_B64}")
 protocol_md = decode_text("${PROTOCOL_MD_B64}")
 lab_report = decode_text("${LAB_REPORT_B64}")
 
-cosmos_conn = os.getenv("AZURE_COSMOS_CONNECTION_STRING", "")
-cosmos_db = os.getenv("AZURE_COSMOS_DATABASE", "cdss-db")
+cosmos_conn = os.getenv("CDSS_AZURE_COSMOS_CONNECTION_STRING", "")
+cosmos_endpoint = os.getenv("CDSS_AZURE_COSMOS_ENDPOINT", "")
+cosmos_key = os.getenv("CDSS_AZURE_COSMOS_KEY", "")
+cosmos_use_entra_id = os.getenv("CDSS_AZURE_COSMOS_USE_ENTRA_ID", "false").lower() == "true"
+cosmos_db = os.getenv("CDSS_AZURE_COSMOS_DATABASE_NAME", "cdss-db")
 
-storage_conn = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
-storage_endpoint = os.getenv("AZURE_STORAGE_ENDPOINT", "")
+storage_conn = os.getenv("CDSS_AZURE_BLOB_CONNECTION_STRING", "")
+storage_endpoint = os.getenv("CDSS_AZURE_BLOB_ENDPOINT", "")
+storage_use_entra_id = os.getenv("CDSS_AZURE_BLOB_USE_ENTRA_ID", "false").lower() == "true"
 
-if not cosmos_conn:
-    print("[ERROR] AZURE_COSMOS_CONNECTION_STRING is not set in Container App.")
+if cosmos_conn:
+    cosmos_client = CosmosClient.from_connection_string(cosmos_conn)
+elif cosmos_key and cosmos_endpoint:
+    cosmos_client = CosmosClient(cosmos_endpoint, cosmos_key)
+elif cosmos_endpoint and cosmos_use_entra_id:
+    cosmos_client = CosmosClient(cosmos_endpoint, DefaultAzureCredential())
+else:
+    print("[ERROR] Cosmos configuration is incomplete in Container App.")
+    print("        Expected CDSS_AZURE_COSMOS_ENDPOINT with key or Entra ID settings.")
     sys.exit(1)
 
 print("[INFO] Seeding Cosmos DB...")
-cosmos_client = CosmosClient.from_connection_string(cosmos_conn)
 
 database = cosmos_client.get_database_client(cosmos_db)
 profiles = database.get_container_client("patient-profiles")
@@ -213,10 +223,11 @@ print("[SUCCESS] Upserted patient profile:", patient.get("id", "unknown"))
 print("[INFO] Seeding Blob Storage...")
 if storage_conn:
     blob_client = BlobServiceClient.from_connection_string(storage_conn)
-elif storage_endpoint:
+elif storage_endpoint and storage_use_entra_id:
     blob_client = BlobServiceClient(account_url=storage_endpoint, credential=DefaultAzureCredential())
 else:
-    print("[ERROR] Neither AZURE_STORAGE_CONNECTION_STRING nor AZURE_STORAGE_ENDPOINT is set in Container App.")
+    print("[ERROR] Blob Storage configuration is incomplete in Container App.")
+    print("        Set CDSS_AZURE_BLOB_CONNECTION_STRING or CDSS_AZURE_BLOB_ENDPOINT + CDSS_AZURE_BLOB_USE_ENTRA_ID=true.")
     sys.exit(1)
 
 blob_client.get_blob_client(

@@ -48,6 +48,7 @@ run_az_tsv SEARCH "Failed to find Azure AI Search service" az search service lis
 run_az_tsv OPENAI "Failed to find Azure OpenAI account" az cognitiveservices account list --resource-group "$RG" --query "[?kind=='OpenAI'].name | [0]"
 run_az_tsv DOCINTEL "Failed to find Document Intelligence account" az cognitiveservices account list --resource-group "$RG" --query "[?kind=='FormRecognizer'].name | [0]"
 run_az_tsv KEYVAULT "Failed to find Key Vault" az keyvault list --resource-group "$RG" --query "[0].name"
+run_az_tsv REDIS "Failed to find Azure Cache for Redis" az redis list --resource-group "$RG" --query "[0].name"
 
 # Get storage account - filter out deployment scripts storage (contains 'scripts' in name)
 run_az_tsv STORAGE "Failed to find Storage account" az storage account list --resource-group "$RG" --query "[?tags.project=='cdss-agentic-rag' && !contains(name, 'scripts')].name | [0]"
@@ -85,6 +86,8 @@ run_az_tsv COSMOS_KEY "Failed to fetch Cosmos key" az cosmosdb keys list --name 
 run_az_tsv SEARCH_KEY "Failed to fetch Search admin key" az search admin-key show --service-name "$SEARCH" --resource-group "$RG" --query primaryKey
 run_az_tsv OPENAI_KEY "Failed to fetch OpenAI key" az cognitiveservices account keys list --name "$OPENAI" --resource-group "$RG" --query key1
 run_az_tsv DOCINTEL_KEY "Failed to fetch Document Intelligence key" az cognitiveservices account keys list --name "$DOCINTEL" --resource-group "$RG" --query key1
+run_az_tsv REDIS_KEY "Failed to fetch Redis key" az redis list-keys --name "$REDIS" --resource-group "$RG" --query primaryKey
+run_az_tsv REDIS_HOST "Failed to fetch Redis host" az redis show --name "$REDIS" --resource-group "$RG" --query hostName
 
 # Storage connection string - for Entra ID auth, we can leave this empty
 run_az_tsv STORAGE_CONN "Failed to fetch Storage connection string" az storage account show-connection-string --name "$STORAGE" --resource-group "$RG" --query connectionString
@@ -161,21 +164,26 @@ if [[ -z "${STORAGE_CONN}" ]]; then
     warn "Storage connection string is unavailable. .env will enable Entra ID auth for Storage."
 fi
 
+REDIS_URL="redis://localhost:6379/0"
+if [[ -n "${REDIS_KEY}" && -n "${REDIS_HOST}" ]]; then
+    REDIS_URL="rediss://:${REDIS_KEY}@${REDIS_HOST}:6380/0"
+fi
+
 # Create .env.azure (for seed-data.sh)
 cat > .env.azure << EOF
 ENVIRONMENT=$ENVIRONMENT
-AZURE_COSMOS_ENDPOINT=$COSMOS_EP
-AZURE_COSMOS_DATABASE=cdss-db
-AZURE_COSMOS_KEY=$COSMOS_KEY
-AZURE_COSMOS_USE_ENTRA_ID=$COSMOS_USE_ENTRA_ID
-AZURE_SEARCH_ENDPOINT=$SEARCH_EP
-AZURE_OPENAI_ENDPOINT=$OPENAI_EP
-AZURE_OPENAI_GPT4O_DEPLOYMENT=gpt-4o
-AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT=gpt-4o-mini
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
-AZURE_STORAGE_ENDPOINT=$STORAGE_EP
-AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN
-AZURE_STORAGE_USE_ENTRA_ID=$STORAGE_USE_ENTRA_ID
+CDSS_AZURE_COSMOS_ENDPOINT=$COSMOS_EP
+CDSS_AZURE_COSMOS_DATABASE_NAME=cdss-db
+CDSS_AZURE_COSMOS_KEY=$COSMOS_KEY
+CDSS_AZURE_COSMOS_USE_ENTRA_ID=$COSMOS_USE_ENTRA_ID
+CDSS_AZURE_SEARCH_ENDPOINT=$SEARCH_EP
+CDSS_AZURE_OPENAI_ENDPOINT=$OPENAI_EP
+CDSS_AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
+CDSS_AZURE_OPENAI_MINI_DEPLOYMENT_NAME=gpt-4o-mini
+CDSS_AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+CDSS_AZURE_BLOB_ENDPOINT=$STORAGE_EP
+CDSS_AZURE_BLOB_CONNECTION_STRING=$STORAGE_CONN
+CDSS_AZURE_BLOB_USE_ENTRA_ID=$STORAGE_USE_ENTRA_ID
 EOF
 
 # Create .env (for Python app)
@@ -197,7 +205,10 @@ CDSS_AZURE_SEARCH_ENDPOINT=$SEARCH_EP
 CDSS_AZURE_SEARCH_API_KEY=$SEARCH_KEY
 CDSS_AZURE_SEARCH_PATIENT_RECORDS_INDEX=patient-records
 CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_INDEX=treatment-protocols
-CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX=medical-literature
+CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX=medical-literature-cache
+CDSS_AZURE_SEARCH_PATIENT_RECORDS_SEMANTIC_CONFIG=patient-records-semantic
+CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_SEMANTIC_CONFIG=protocols-semantic
+CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_SEMANTIC_CONFIG=literature-semantic
 
 # ── Azure Cosmos DB ───────────────────────────────────────────────────────────
 CDSS_AZURE_COSMOS_ENDPOINT=$COSMOS_EP
@@ -218,11 +229,12 @@ CDSS_AZURE_DOCUMENT_INTELLIGENCE_KEY=$DOCINTEL_KEY
 CDSS_AZURE_BLOB_CONNECTION_STRING=$STORAGE_CONN
 CDSS_AZURE_BLOB_ENDPOINT=$STORAGE_EP
 CDSS_AZURE_BLOB_USE_ENTRA_ID=$STORAGE_USE_ENTRA_ID
-CDSS_AZURE_BLOB_PROTOCOLS_CONTAINER=protocols
+CDSS_AZURE_BLOB_PROTOCOLS_CONTAINER=treatment-protocols
+CDSS_AZURE_KEY_VAULT_URL=https://$KEYVAULT.vault.azure.net/
 
 # ── PubMed / NCBI Entrez ─────────────────────────────────────────────────────
-CDSS_PUBMED_API_KEY=d09d9c8ab2a38dbb685542d97704f62cb608
-CDSS_PUBMED_EMAIL=heeyaichen@k21academy.com
+CDSS_PUBMED_API_KEY=
+CDSS_PUBMED_EMAIL=
 CDSS_PUBMED_BASE_URL=https://eutils.ncbi.nlm.nih.gov/entrez/eutils/
 
 # ── OpenFDA ──────────────────────────────────────────────────────────────────
@@ -236,12 +248,20 @@ CDSS_DRUGBANK_API_KEY=
 CDSS_DRUGBANK_BASE_URL=https://api.drugbank.com/v1
 
 # ── Redis ────────────────────────────────────────────────────────────────────
-CDSS_REDIS_URL=redis://localhost:6379/0
+CDSS_REDIS_URL=$REDIS_URL
 
 # ── Application Settings ─────────────────────────────────────────────────────
 CDSS_DEBUG=false
 CDSS_LOG_LEVEL=INFO
 CDSS_CORS_ORIGINS=["http://localhost:3000"]
+CDSS_CORS_ALLOW_METHODS=["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
+CDSS_CORS_ALLOW_HEADERS=["Authorization","Content-Type","X-Request-ID"]
+CDSS_CORS_EXPOSE_HEADERS=["X-Request-ID","X-Trace-ID"]
+CDSS_CORS_ALLOW_CREDENTIALS=true
+CDSS_AUTH_ENABLED=false
+CDSS_AUTH_TENANT_ID=
+CDSS_AUTH_AUDIENCE=
+CDSS_AUTH_REQUIRED_SCOPES=[]
 CDSS_MAX_CONCURRENT_AGENTS=10
 CDSS_RESPONSE_TIMEOUT_SECONDS=30
 CDSS_CONFIDENCE_THRESHOLD=0.6
