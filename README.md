@@ -665,32 +665,37 @@ The application is configured via environment variables. Copy `.env.example` to 
 
 | Variable | Description |
 |----------|-------------|
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI service endpoint URL |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
-| `AZURE_OPENAI_GPT4O_DEPLOYMENT` | GPT-4o model deployment name |
-| `AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT` | GPT-4o-mini model deployment name |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | text-embedding-3-large deployment name |
-| `AZURE_SEARCH_ENDPOINT` | Azure AI Search service endpoint URL |
-| `AZURE_SEARCH_API_KEY` | Azure AI Search admin API key |
-| `AZURE_COSMOS_ENDPOINT` | Azure Cosmos DB endpoint URL |
-| `AZURE_COSMOS_KEY` | Azure Cosmos DB primary key |
-| `AZURE_COSMOS_DATABASE` | Cosmos DB database name (default: `cdss`) |
-| `AZURE_SQL_CONNECTION_STRING` | Azure SQL Database connection string |
-| `AZURE_BLOB_CONNECTION_STRING` | Azure Blob Storage connection string |
-| `AZURE_BLOB_CONTAINER` | Blob container name for documents (default: `medical-documents`) |
-| `AZURE_DOCUMENT_INTEL_ENDPOINT` | Azure Document Intelligence endpoint |
-| `AZURE_DOCUMENT_INTEL_KEY` | Azure Document Intelligence API key |
-| `AZURE_KEYVAULT_URL` | Azure Key Vault URL |
-| `REDIS_URL` | Redis connection URL (default: `redis://localhost:6379`) |
+| `CDSS_AZURE_OPENAI_ENDPOINT` | Azure OpenAI service endpoint URL |
+| `CDSS_AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
+| `CDSS_AZURE_OPENAI_DEPLOYMENT_NAME` | GPT-4o model deployment name |
+| `CDSS_AZURE_OPENAI_MINI_DEPLOYMENT_NAME` | GPT-4o-mini model deployment name |
+| `CDSS_AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | text-embedding-3-large deployment name |
+| `CDSS_AZURE_SEARCH_ENDPOINT` | Azure AI Search service endpoint URL |
+| `CDSS_AZURE_SEARCH_API_KEY` | Azure AI Search admin API key |
+| `CDSS_AZURE_SEARCH_PATIENT_RECORDS_INDEX` | Patient records index name (default: `patient-records`) |
+| `CDSS_AZURE_SEARCH_TREATMENT_PROTOCOLS_INDEX` | Treatment protocols index name (default: `treatment-protocols`) |
+| `CDSS_AZURE_SEARCH_MEDICAL_LITERATURE_INDEX` | Literature index name (default: `medical-literature-cache`) |
+| `CDSS_AZURE_COSMOS_ENDPOINT` | Azure Cosmos DB endpoint URL |
+| `CDSS_AZURE_COSMOS_KEY` | Azure Cosmos DB primary key (optional when Entra ID is enabled) |
+| `CDSS_AZURE_COSMOS_DATABASE_NAME` | Cosmos DB database name (default: `cdss-db`) |
+| `CDSS_AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Azure Document Intelligence endpoint |
+| `CDSS_AZURE_DOCUMENT_INTELLIGENCE_KEY` | Azure Document Intelligence API key |
+| `CDSS_AZURE_BLOB_CONNECTION_STRING` | Azure Blob Storage connection string |
+| `CDSS_AZURE_BLOB_ENDPOINT` | Azure Blob Storage endpoint URL |
+| `CDSS_AZURE_KEY_VAULT_URL` | Azure Key Vault URL |
+| `CDSS_REDIS_URL` | Redis connection URL |
 
 ### Optional Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PUBMED_API_KEY` | `None` | NCBI API key for higher PubMed rate limits |
-| `DRUGBANK_API_KEY` | `None` | DrugBank API key for drug interaction data |
-| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
-| `CORS_ORIGINS` | `["http://localhost:3000"]` | Allowed CORS origins |
+| `CDSS_PUBMED_API_KEY` | `None` | NCBI API key for higher PubMed rate limits |
+| `CDSS_DRUGBANK_API_KEY` | `None` | DrugBank API key for drug interaction data |
+| `CDSS_LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `CDSS_CORS_ORIGINS` | `["http://localhost:3000"]` | Allowed CORS origins |
+| `CDSS_AUTH_ENABLED` | `false` | Enable Entra ID JWT validation middleware |
+| `CDSS_AUTH_TENANT_ID` | `None` | Entra tenant ID for JWT issuer/JWKS |
+| `CDSS_AUTH_AUDIENCE` | `None` | Entra API audience (Application ID URI/client ID) |
 | `MAX_CONCURRENT_AGENTS` | `5` | Maximum parallel agent executions |
 | `RAG_TOP_K` | `10` | Number of documents to retrieve per query |
 | `RAG_RERANK_TOP_N` | `5` | Number of documents after reranking |
