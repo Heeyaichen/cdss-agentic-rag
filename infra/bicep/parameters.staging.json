@@ -14,6 +14,18 @@
     "containerImage": {
       "value": "cdssacr.azurecr.io/cdss-api:latest"
     },
+    "acrUseManagedIdentity": {
+      "value": false
+    },
+    "acrName": {
+      "value": ""
+    },
+    "acrCreate": {
+      "value": false
+    },
+    "acrSku": {
+      "value": "Standard"
+    },
     "gpt4oDeploymentName": {
       "value": "gpt-4o"
     },
@@ -29,7 +41,8 @@
     "corsAllowedOrigins": {
       "value": [
         "https://staging-cdss-frontend.example.com",
-        "http://localhost:3000"
+        "http://localhost:3000",
+        "http://localhost:3001"
       ]
     },
     "authEnabled": {

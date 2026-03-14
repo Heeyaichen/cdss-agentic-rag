@@ -17,6 +17,18 @@
     "containerImage": {
       "value": "cdssacr.azurecr.io/cdss-api:latest"
     },
+    "acrUseManagedIdentity": {
+      "value": false
+    },
+    "acrName": {
+      "value": ""
+    },
+    "acrCreate": {
+      "value": false
+    },
+    "acrSku": {
+      "value": "Standard"
+    },
     "gpt4oDeploymentName": {
       "value": "gpt-4o"
     },
