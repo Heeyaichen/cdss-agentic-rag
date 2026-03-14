@@ -16,9 +16,9 @@ from cdss.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Container name constants
+# Logical container identifiers used by the Python codebase.
 CONTAINER_PATIENT_PROFILES = "patient_profiles"
-CONTAINER_CONVERSATIONS = "conversations"
+CONTAINER_CONVERSATIONS = "conversation_history"
 CONTAINER_EMBEDDING_CACHE = "embedding_cache"
 CONTAINER_AUDIT_LOG = "audit_log"
 CONTAINER_AGENT_STATE = "agent_state"
@@ -55,31 +55,27 @@ class CosmosDBClient:
             self._database = self._client.get_database_client(
                 self._settings.cosmos_db_database_name
             )
+            self._container_name_map: dict[str, str] = {
+                CONTAINER_PATIENT_PROFILES: self._settings.azure_cosmos_patient_profiles_container,
+                CONTAINER_CONVERSATIONS: self._settings.azure_cosmos_conversation_history_container,
+                CONTAINER_EMBEDDING_CACHE: self._settings.azure_cosmos_embedding_cache_container,
+                CONTAINER_AUDIT_LOG: self._settings.azure_cosmos_audit_log_container,
+                CONTAINER_AGENT_STATE: self._settings.azure_cosmos_agent_state_container,
+            }
 
             self._containers = {
-                CONTAINER_PATIENT_PROFILES: self._database.get_container_client(
-                    CONTAINER_PATIENT_PROFILES
-                ),
-                CONTAINER_CONVERSATIONS: self._database.get_container_client(
-                    CONTAINER_CONVERSATIONS
-                ),
-                CONTAINER_EMBEDDING_CACHE: self._database.get_container_client(
-                    CONTAINER_EMBEDDING_CACHE
-                ),
-                CONTAINER_AUDIT_LOG: self._database.get_container_client(
-                    CONTAINER_AUDIT_LOG
-                ),
-                CONTAINER_AGENT_STATE: self._database.get_container_client(
-                    CONTAINER_AGENT_STATE
-                ),
+                logical_name: self._database.get_container_client(physical_name)
+                for logical_name, physical_name in self._container_name_map.items()
             }
+            for logical_name, physical_name in self._container_name_map.items():
+                self._containers[physical_name] = self._containers[logical_name]
 
             logger.info(
                 "CosmosDBClient initialized",
                 endpoint=self._settings.cosmos_db_endpoint,
                 database=self._settings.cosmos_db_database_name,
                 auth_mode=auth_mode,
-                containers=list(self._containers.keys()),
+                containers=self._container_name_map,
             )
 
         except Exception as exc:

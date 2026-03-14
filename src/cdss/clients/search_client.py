@@ -14,7 +14,7 @@ from cdss.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Index name constants
+# Logical index identifiers used across the Python codebase.
 INDEX_PATIENT_RECORDS = "patient_records"
 INDEX_TREATMENT_PROTOCOLS = "treatment_protocols"
 INDEX_MEDICAL_LITERATURE = "medical_literature"
@@ -38,19 +38,37 @@ class AzureSearchClient:
         self._settings = settings or get_settings()
         self._credential = AzureKeyCredential(self._settings.azure_search_api_key)
         self._endpoint = self._settings.azure_search_endpoint
+        self._index_name_map: dict[str, str] = {
+            INDEX_PATIENT_RECORDS: self._settings.azure_search_patient_records_index,
+            INDEX_TREATMENT_PROTOCOLS: self._settings.azure_search_treatment_protocols_index,
+            INDEX_MEDICAL_LITERATURE: self._settings.azure_search_medical_literature_index,
+        }
+        patient_semantic = self._settings.azure_search_patient_records_semantic_config
+        protocols_semantic = self._settings.azure_search_treatment_protocols_semantic_config
+        literature_semantic = self._settings.azure_search_medical_literature_semantic_config
+        self._semantic_config_map: dict[str, str] = {
+            INDEX_PATIENT_RECORDS: patient_semantic,
+            self._settings.azure_search_patient_records_index: patient_semantic,
+            INDEX_TREATMENT_PROTOCOLS: protocols_semantic,
+            self._settings.azure_search_treatment_protocols_index: protocols_semantic,
+            INDEX_MEDICAL_LITERATURE: literature_semantic,
+            self._settings.azure_search_medical_literature_index: literature_semantic,
+        }
 
         self._clients: dict[str, SearchClient] = {}
-        for index_name in ALL_INDEXES:
-            self._clients[index_name] = SearchClient(
+        for logical_index_name, physical_index_name in self._index_name_map.items():
+            client = SearchClient(
                 endpoint=self._endpoint,
-                index_name=index_name,
+                index_name=physical_index_name,
                 credential=self._credential,
             )
+            self._clients[logical_index_name] = client
+            self._clients[physical_index_name] = client
 
         logger.info(
             "AzureSearchClient initialized",
             endpoint=self._endpoint,
-            indexes=ALL_INDEXES,
+            indexes=self._index_name_map,
         )
 
     def _get_client(self, index_name: str) -> SearchClient:
@@ -80,7 +98,7 @@ class AzureSearchClient:
         query_vector: list[float] | None = None,
         filters: str | None = None,
         top: int = 50,
-        semantic_config: str = "default",
+        semantic_config: str | None = None,
     ) -> list[dict]:
         """Perform hybrid search (BM25 + vector) with optional semantic reranking.
 
@@ -96,6 +114,7 @@ class AzureSearchClient:
             filters: Optional OData filter expression.
             top: Maximum number of results to return.
             semantic_config: Name of the semantic configuration to use.
+                If omitted, uses the index-specific configured default.
 
         Returns:
             List of result dicts with keys: id, score, reranker_score,
@@ -107,10 +126,11 @@ class AzureSearchClient:
         client = self._get_client(index_name)
 
         try:
+            resolved_semantic_config = semantic_config or self._semantic_config_map.get(index_name, "default")
             search_kwargs: dict[str, Any] = {
                 "search_text": query,
                 "query_type": "semantic",
-                "semantic_configuration_name": semantic_config,
+                "semantic_configuration_name": resolved_semantic_config,
                 "top": top,
                 "include_total_count": True,
             }
@@ -129,6 +149,7 @@ class AzureSearchClient:
             logger.debug(
                 "Executing hybrid search",
                 index=index_name,
+                semantic_config=resolved_semantic_config,
                 query_length=len(query),
                 has_vector=query_vector is not None,
                 has_filter=filters is not None,
@@ -215,7 +236,7 @@ class AzureSearchClient:
             query_vector=query_vector,
             filters=filters,
             top=top,
-            semantic_config="patient-records-config",
+            semantic_config=self._settings.azure_search_patient_records_semantic_config,
         )
 
     async def search_treatment_protocols(
@@ -255,7 +276,7 @@ class AzureSearchClient:
             query_vector=query_vector,
             filters=filters,
             top=top,
-            semantic_config="treatment-protocols-config",
+            semantic_config=self._settings.azure_search_treatment_protocols_semantic_config,
         )
 
     async def search_medical_literature(
@@ -287,7 +308,7 @@ class AzureSearchClient:
             query=query,
             query_vector=query_vector,
             top=top,
-            semantic_config="medical-literature-config",
+            semantic_config=self._settings.azure_search_medical_literature_semantic_config,
         )
 
     async def index_document(self, index_name: str, document: dict) -> None:
@@ -307,7 +328,7 @@ class AzureSearchClient:
 
             succeeded = sum(1 for r in result if r.succeeded)
             if succeeded == 0:
-                error_messages = [r.error_message for r in result if not r.succeeded]
+                error_messages = [r.error_message or "unknown error" for r in result if not r.succeeded]
                 raise RetrieverError(
                     f"Document indexing failed: {'; '.join(error_messages)}"
                 )

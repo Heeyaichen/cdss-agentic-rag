@@ -39,21 +39,31 @@ def get_settings_from_env() -> dict[str, str]:
                     settings[key] = value
 
     for key, value in os.environ.items():
-        if key.startswith("AZURE_") or key.startswith("CDSS_"):
+        if key.startswith("CDSS_") or key == "ENVIRONMENT":
             settings[key] = value
 
     return settings
 
 
+def read_setting(
+    settings: dict[str, str],
+    key: str,
+    default: str = "",
+) -> str:
+    if key in settings and settings[key] != "":
+        return settings[key]
+    return default
+
+
 def seed_cosmos(settings: dict[str, str], sample_data_dir: Path) -> bool:
-    endpoint = settings.get("AZURE_COSMOS_ENDPOINT", "")
+    endpoint = read_setting(settings, "CDSS_AZURE_COSMOS_ENDPOINT")
     if not endpoint:
-        print("[ERROR] AZURE_COSMOS_ENDPOINT not set")
+        print("[ERROR] CDSS_AZURE_COSMOS_ENDPOINT not set")
         return False
 
-    database_name = settings.get("AZURE_COSMOS_DATABASE", "cdss-db")
-    cosmos_key = settings.get("AZURE_COSMOS_KEY", "")
-    use_entra_id = settings.get("AZURE_COSMOS_USE_ENTRA_ID", "false").lower() == "true"
+    database_name = read_setting(settings, "CDSS_AZURE_COSMOS_DATABASE_NAME", "cdss-db")
+    cosmos_key = read_setting(settings, "CDSS_AZURE_COSMOS_KEY")
+    use_entra_id = read_setting(settings, "CDSS_AZURE_COSMOS_USE_ENTRA_ID", "false").lower() == "true"
 
     print(f"[INFO] Connecting to Cosmos DB: {endpoint}")
     if not use_entra_id and cosmos_key:
@@ -82,16 +92,16 @@ def seed_cosmos(settings: dict[str, str], sample_data_dir: Path) -> bool:
 
 
 def seed_blob_storage(settings: dict[str, str], sample_data_dir: Path) -> bool:
-    endpoint = settings.get("AZURE_STORAGE_ENDPOINT", "")
-    connection_string = settings.get("AZURE_STORAGE_CONNECTION_STRING", "")
-    use_entra_id = settings.get("AZURE_STORAGE_USE_ENTRA_ID", "false").lower() == "true"
+    endpoint = read_setting(settings, "CDSS_AZURE_BLOB_ENDPOINT")
+    connection_string = read_setting(settings, "CDSS_AZURE_BLOB_CONNECTION_STRING")
+    use_entra_id = read_setting(settings, "CDSS_AZURE_BLOB_USE_ENTRA_ID", "false").lower() == "true"
 
     if not use_entra_id and connection_string:
         print("[INFO] Connecting to Blob Storage using connection string")
         client = BlobServiceClient.from_connection_string(connection_string)
     else:
         if not endpoint:
-            print("[ERROR] AZURE_STORAGE_ENDPOINT not set")
+            print("[ERROR] CDSS_AZURE_BLOB_ENDPOINT not set")
             return False
         print(f"[INFO] Connecting to Blob Storage: {endpoint}")
         print("[INFO] Using Entra ID authentication")

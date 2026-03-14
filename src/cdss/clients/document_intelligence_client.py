@@ -33,16 +33,21 @@ class DocumentIntelligenceClient:
         """
         self._settings = settings or get_settings()
 
+        if not self._settings.azure_document_intelligence_endpoint:
+            raise DocumentProcessingError("CDSS_AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT is not configured")
+        if not self._settings.azure_document_intelligence_key:
+            raise DocumentProcessingError("CDSS_AZURE_DOCUMENT_INTELLIGENCE_KEY is not configured")
+
         self._client = AzureDocIntelClient(
-            endpoint=self._settings.document_intelligence_endpoint,
+            endpoint=self._settings.azure_document_intelligence_endpoint,
             credential=AzureKeyCredential(
-                self._settings.document_intelligence_api_key
+                self._settings.azure_document_intelligence_key
             ),
         )
 
         logger.info(
             "DocumentIntelligenceClient initialized",
-            endpoint=self._settings.document_intelligence_endpoint,
+            endpoint=self._settings.azure_document_intelligence_endpoint,
         )
 
     async def analyze_document(

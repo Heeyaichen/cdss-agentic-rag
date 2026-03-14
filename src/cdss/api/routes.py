@@ -11,7 +11,17 @@ import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -433,7 +443,7 @@ async def search_patients(
     search: str | None = Query(None, description="Search query string."),
     page: int = Query(1, ge=1, le=100, description="Page number."),
     limit: int = Query(100, description="Maximum results per page."),
-    service: ClinicalQueryService = Depends(get_query_service),
+    _service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
     """Search patients by name and other criteria.
 
@@ -446,30 +456,90 @@ async def search_patients(
     Returns:
         Dictionary with pagination metadata and patient list.
     """
-    # Mock data for local testing without Azure services
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Mock data for local testing without Azure services.
+    # Shape aligns with PatientProfile used by the frontend.
     mock_patients = [
         {
+            "id": "patient-001",
             "patient_id": "patient_001",
-            "name": "John Smith",
-            "age": 65,
-            "gender": "male",
-            "conditions": ["Type 2 Diabetes", "Hypertension"],
-            "medications": [
-                {"name": "Metformin", "dose": "500mg", "frequency": "BID"},
-                {"name": "Lisinopril", "dose": "10mg", "frequency": "QD"},
+            "doc_type": "patient_profile",
+            "demographics": {
+                "age": 65,
+                "sex": "male",
+                "weight_kg": 84,
+                "height_cm": 176,
+            },
+            "active_conditions": [
+                {
+                    "code": "E11.9",
+                    "coding_system": "ICD-10",
+                    "display": "Type 2 Diabetes Mellitus",
+                    "status": "active",
+                },
+                {
+                    "code": "I10",
+                    "coding_system": "ICD-10",
+                    "display": "Hypertension",
+                    "status": "active",
+                },
             ],
-            "allergies": ["Penicillin"],
+            "active_medications": [
+                {
+                    "rxcui": "860975",
+                    "name": "Metformin",
+                    "dose": "500 mg",
+                    "frequency": "BID",
+                },
+                {
+                    "rxcui": "29046",
+                    "name": "Lisinopril",
+                    "dose": "10 mg",
+                    "frequency": "QD",
+                },
+            ],
+            "allergies": [
+                {"substance": "Penicillin", "reaction": "Rash", "severity": "moderate"},
+            ],
+            "recent_labs": [],
+            "last_updated": now_iso,
         },
         {
+            "id": "patient-002",
             "patient_id": "patient_002",
-            "name": "Jane Doe",
-            "age": 58,
-            "gender": "female",
-            "conditions": ["CKD Stage 3", "Hyperlipidemia"],
-            "medications": [
-                {"name": "Empagliflozin", "dose": "10mg", "frequency": "QD"},
+            "doc_type": "patient_profile",
+            "demographics": {
+                "age": 58,
+                "sex": "female",
+                "weight_kg": 73,
+                "height_cm": 162,
+            },
+            "active_conditions": [
+                {
+                    "code": "N18.30",
+                    "coding_system": "ICD-10",
+                    "display": "CKD Stage 3",
+                    "status": "active",
+                },
+                {
+                    "code": "E78.5",
+                    "coding_system": "ICD-10",
+                    "display": "Hyperlipidemia",
+                    "status": "active",
+                },
+            ],
+            "active_medications": [
+                {
+                    "rxcui": "1488563",
+                    "name": "Empagliflozin",
+                    "dose": "10 mg",
+                    "frequency": "QD",
+                },
             ],
             "allergies": [],
+            "recent_labs": [],
+            "last_updated": now_iso,
         },
     ]
 
@@ -478,7 +548,13 @@ async def search_patients(
     if search:
         search_lower = search.lower()
         filtered_patients = [
-            p for p in mock_patients if search_lower in p["name"].lower() or any(c.lower() for c in p["conditions"])
+            p
+            for p in mock_patients
+            if (
+                search_lower in p["patient_id"].lower()
+                or any(search_lower in c["display"].lower() for c in p["active_conditions"])
+                or any(search_lower in m["name"].lower() for m in p["active_medications"])
+            )
         ]
 
     # Pagination
@@ -489,6 +565,7 @@ async def search_patients(
     return {
         "patients": paginated_patients,
         "page": page,
+        "page_size": limit,
         "limit": limit,
         "total": len(filtered_patients),
     }
@@ -646,14 +723,19 @@ _ingestion_status: dict[str, dict] = {}
     summary="Ingest a medical document",
 )
 async def ingest_document(
-    file: UploadFile,
-    document_type: str = Query(
-        ...,
+    request: Request,
+    file: UploadFile = File(...),
+    document_type: str | None = Form(
+        default=None,
         description="Document type: 'protocol', 'patient_record', 'literature'.",
     ),
-    patient_id: str | None = Query(
-        None,
+    patient_id: str | None = Form(
+        default=None,
         description="Optional patient ID to associate the document with.",
+    ),
+    metadata: str | None = Form(
+        default=None,
+        description="Optional JSON metadata payload as string.",
     ),
     background_tasks: BackgroundTasks = None,
 ) -> dict:
@@ -687,6 +769,26 @@ async def ingest_document(
             ),
         )
 
+    # Query parameter fallback for backward compatibility.
+    if document_type is None:
+        document_type = request.query_params.get("document_type")
+    if patient_id is None:
+        patient_id = request.query_params.get("patient_id")
+
+    if document_type is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Missing required document_type. Provide it in multipart form or as query parameter.",
+        )
+
+    metadata_payload: dict[str, object] | None = None
+    if metadata:
+        try:
+            parsed = json.loads(metadata)
+            metadata_payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {exc}") from exc
+
     # Validate document_type
     valid_document_types = {"protocol", "patient_record", "literature"}
     if document_type not in valid_document_types:
@@ -715,7 +817,8 @@ async def ingest_document(
         "filename": file.filename,
         "document_type": document_type,
         "patient_id": patient_id,
-        "status": "queued",
+        "metadata": metadata_payload or {},
+        "status": "pending",
         "progress": 0,
         "created_at": now,
         "updated_at": now,
@@ -731,6 +834,7 @@ async def ingest_document(
             filename=file.filename or "unknown",
             document_type=document_type,
             patient_id=patient_id,
+            metadata=metadata_payload,
         )
 
     logger.info(
@@ -740,13 +844,14 @@ async def ingest_document(
             "filename": file.filename,
             "document_type": document_type,
             "patient_id": patient_id,
+            "metadata_keys": sorted((metadata_payload or {}).keys()),
             "size_bytes": len(file_content),
         },
     )
 
     return {
         "document_id": document_id,
-        "status": "queued",
+        "status": "pending",
         "message": "Document accepted for processing.",
     }
 
@@ -757,6 +862,7 @@ async def _process_document_background(
     filename: str,
     document_type: str,
     patient_id: str | None,
+    metadata: dict[str, object] | None,
 ) -> None:
     """Background task that processes an ingested document.
 
@@ -792,6 +898,7 @@ async def _process_document_background(
                 "document_id": document_id,
                 "filename": filename,
                 "document_type": document_type,
+                "metadata_keys": sorted((metadata or {}).keys()),
             },
         )
 

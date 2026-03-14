@@ -17,6 +17,9 @@ from uuid import uuid4
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from jwt import PyJWKClient  # type: ignore[import-untyped]
+from jwt import decode as jwt_decode  # type: ignore[import-untyped]
+from jwt.exceptions import InvalidTokenError, PyJWKClientError  # type: ignore[import-untyped]
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from cdss.core.config import Settings, get_settings
@@ -58,16 +61,158 @@ def add_cors_middleware(app: FastAPI, settings: Settings | None = None) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["X-Request-ID", "X-Trace-ID"],
+        allow_credentials=settings.cors_allow_credentials,
+        allow_methods=settings.cors_allow_methods,
+        allow_headers=settings.cors_allow_headers,
+        expose_headers=settings.cors_expose_headers,
     )
 
     logger.info(
         "CORS middleware configured",
         extra={"allowed_origins": settings.cors_origins},
     )
+
+
+# ==========================================================================
+# Entra ID JWT Authentication Middleware
+# ==========================================================================
+
+
+class EntraJWTAuthMiddleware(BaseHTTPMiddleware):
+    """Validate Azure Entra ID bearer tokens for protected API routes."""
+
+    _PUBLIC_PATHS: set[str] = {
+        "/api/v1/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+
+    def __init__(self, app: FastAPI, settings: Settings | None = None) -> None:
+        super().__init__(app)
+        self._settings = settings or get_settings()
+        self._enabled = self._settings.auth_enabled
+        self._tenant_id = self._settings.auth_tenant_id.strip()
+        self._audience = self._settings.auth_audience.strip()
+        self._required_scopes = set(self._settings.auth_required_scopes)
+
+        self._issuer = (
+            f"https://login.microsoftonline.com/{self._tenant_id}/v2.0"
+            if self._tenant_id
+            else ""
+        )
+        self._jwks_client = (
+            PyJWKClient(
+                f"https://login.microsoftonline.com/{self._tenant_id}/discovery/v2.0/keys"
+            )
+            if self._tenant_id
+            else None
+        )
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        if not self._enabled:
+            return await call_next(request)
+
+        path = request.url.path
+        if not path.startswith("/api/") or path in self._PUBLIC_PATHS:
+            return await call_next(request)
+
+        if not self._tenant_id or not self._audience or self._jwks_client is None:
+            logger.error(
+                "Authentication is enabled but Entra JWT settings are incomplete",
+                extra={
+                    "tenant_id_set": bool(self._tenant_id),
+                    "audience_set": bool(self._audience),
+                },
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "type": "auth_configuration_error",
+                        "message": (
+                            "Authentication is enabled but auth configuration is incomplete. "
+                            "Set CDSS_AUTH_TENANT_ID and CDSS_AUTH_AUDIENCE."
+                        ),
+                    }
+                },
+            )
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+                content={
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "Missing bearer token.",
+                    }
+                },
+            )
+
+        token = auth_header.split(" ", 1)[1].strip()
+        if not token:
+            return JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+                content={
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "Empty bearer token.",
+                    }
+                },
+            )
+
+        try:
+            signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+            claims = jwt_decode(
+                token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=self._audience,
+                issuer=self._issuer,
+            )
+
+            if self._required_scopes:
+                token_scopes = set(str(claims.get("scp", "")).split())
+                if not self._required_scopes.issubset(token_scopes):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "error": {
+                                "type": "authorization_error",
+                                "message": "Token does not include required scopes.",
+                                "details": {
+                                    "required_scopes": sorted(self._required_scopes),
+                                    "token_scopes": sorted(token_scopes),
+                                },
+                            }
+                        },
+                    )
+
+            request.state.auth_claims = claims
+            request.state.auth_subject = claims.get("oid") or claims.get("sub")
+
+        except (PyJWKClientError, InvalidTokenError) as exc:
+            logger.warning(
+                "JWT validation failed",
+                extra={"path": path, "error": str(exc)},
+            )
+            return JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+                content={
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "Invalid or expired bearer token.",
+                    }
+                },
+            )
+
+        return await call_next(request)
 
 
 # ==========================================================================
@@ -401,9 +546,10 @@ def register_middleware(app: FastAPI, settings: Settings | None = None) -> None:
     so the order here matters:
         1. CORS (outermost -- must run first for preflight requests)
         2. Request ID (sets trace context before anything else)
-        3. Logging (wraps everything for observability)
-        4. Error Handling (catches exceptions from inner layers)
-        5. Rate Limiting (innermost before route handlers)
+        3. Entra JWT Auth (validates bearer token when enabled)
+        4. Logging (wraps everything for observability)
+        5. Error Handling (catches exceptions from inner layers)
+        6. Rate Limiting (innermost before route handlers)
 
     Args:
         app: The FastAPI application instance.
@@ -416,6 +562,7 @@ def register_middleware(app: FastAPI, settings: Settings | None = None) -> None:
     app.add_middleware(RateLimitMiddleware, max_requests=100, window_seconds=60)
     app.add_middleware(ErrorHandlingMiddleware)
     app.add_middleware(LoggingMiddleware)
+    app.add_middleware(EntraJWTAuthMiddleware, settings=settings)
     app.add_middleware(RequestIDMiddleware)
 
     # CORS must be outermost, added last

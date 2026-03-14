@@ -63,7 +63,7 @@ class BlobStorageClient:
             self._container_name = getattr(
                 self._settings,
                 "blob_storage_container_name",
-                PROTOCOLS_CONTAINER,
+                self._settings.azure_blob_protocols_container or PROTOCOLS_CONTAINER,
             )
             self._container_client = self._service_client.get_container_client(self._container_name)
 
