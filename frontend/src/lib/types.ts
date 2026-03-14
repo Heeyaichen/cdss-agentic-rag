@@ -80,7 +80,7 @@ export interface Citation {
 }
 
 export interface DrugAlert {
-  id: string;
+  id?: string;
   severity: 'minor' | 'moderate' | 'major';
   description: string;
   source: string;

@@ -67,6 +67,9 @@ const getSeverityGroup = (alerts: DrugAlert[], severity: AlertSeverity): DrugAle
   return alerts.filter((alert) => alert.severity === severity);
 };
 
+const buildAlertKey = (alert: DrugAlert, index: number): string =>
+  alert.id ?? `${alert.severity}:${alert.source}:${alert.description}:${index}`;
+
 export default function DrugAlertBanner({
   alerts,
   onViewDetails,
@@ -81,7 +84,8 @@ export default function DrugAlertBanner({
     return null;
   }
 
-  const visibleAlerts = alerts.filter((alert) => !dismissedIds.has(alert.id));
+  const alertKeys = new Map<DrugAlert, string>(alerts.map((alert, index) => [alert, buildAlertKey(alert, index)]));
+  const visibleAlerts = alerts.filter((alert) => !dismissedIds.has(alertKeys.get(alert) ?? ""));
   
   const majorAlerts = getSeverityGroup(visibleAlerts, 'major');
   const moderateAlerts = getSeverityGroup(visibleAlerts, 'moderate');
@@ -122,9 +126,12 @@ export default function DrugAlertBanner({
         </AlertTitle>
         
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-          {alertsInGroup.map((alert) => (
+          {alertsInGroup.map((alert, index) => {
+            const alertKey = alertKeys.get(alert) ?? `${severity}:${index}`;
+
+            return (
             <Box
-              key={alert.id}
+              key={alertKey}
               sx={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -150,7 +157,7 @@ export default function DrugAlertBanner({
                   {dismissible && (
                     <IconButton
                       size="small"
-                      onClick={() => handleDismiss(alert.id)}
+                      onClick={() => handleDismiss(alertKey)}
                       aria-label="Dismiss alert"
                     >
                       <Close fontSize="small" />
@@ -194,7 +201,8 @@ export default function DrugAlertBanner({
                 </Button>
               )}
             </Box>
-          ))}
+          );
+          })}
         </Box>
       </Alert>
     );

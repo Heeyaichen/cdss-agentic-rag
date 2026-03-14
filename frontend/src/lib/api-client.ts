@@ -1,8 +1,27 @@
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
 import { msalInstance } from './auth';
-import { ApiError, DocumentIngestResponse, DocumentIngestionStatusResponse, PatientProfile } from './types';
+import {
+  ApiError,
+  ClinicalResponse,
+  DocumentIngestResponse,
+  DocumentIngestionStatusResponse,
+  PatientListResponse,
+  PatientProfile,
+  StreamingQueryUpdate,
+} from './types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+function resolveApiBaseUrl(rawValue: string | undefined): string {
+  const value = (rawValue || '/api').trim();
+  if (import.meta.env.PROD) {
+    const isAbsolute = /^https?:\/\//i.test(value);
+    if (!isAbsolute || !value.toLowerCase().startsWith('https://')) {
+      throw new Error('VITE_API_BASE_URL must be an absolute HTTPS URL in production.');
+    }
+  }
+  return value.replace(/\/+$/, '');
+}
+
+const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const API_SCOPE = import.meta.env.VITE_API_SCOPE || '';
 
 class ApiClient {
@@ -20,7 +39,7 @@ class ApiClient {
     this.client.interceptors.request.use(async (config) => {
       try {
         const account = msalInstance.getAllAccounts()[0];
-        if (account) {
+        if (account && API_SCOPE) {
           const response = await msalInstance.acquireTokenSilent({
             scopes: [API_SCOPE],
             account,
@@ -88,7 +107,7 @@ export const clinicalApi = {
   },
 
   searchPatients: async (params: { search?: string; page?: number; limit?: number }) => {
-    return apiClient.get('/v1/patients', { params });
+    return apiClient.get<PatientListResponse>('/v1/patients', { params });
   },
 
   checkDrugInteractions: async (medications: Array<{ name: string; rxcui?: string }>, patientId?: string) => {
@@ -162,24 +181,119 @@ export function createStreamingConnection(
   });
 
   const eventSource = new EventSource(`${API_BASE_URL}/v1/query/stream?${params}`);
+  let closed = false;
 
-  eventSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      onMessage(data);
-    } catch {
-      onMessage(event.data);
+  const normalizeUpdate = (eventName: string, payload: unknown): StreamingQueryUpdate | null => {
+    if (payload && typeof payload === 'object' && 'type' in payload) {
+      const maybeTyped = payload as StreamingQueryUpdate;
+      if (
+        maybeTyped.type === 'agent_start' ||
+        maybeTyped.type === 'agent_progress' ||
+        maybeTyped.type === 'agent_complete' ||
+        maybeTyped.type === 'synthesis_start' ||
+        maybeTyped.type === 'synthesis_complete' ||
+        maybeTyped.type === 'validation_start' ||
+        maybeTyped.type === 'validation_complete' ||
+        maybeTyped.type === 'error'
+      ) {
+        return maybeTyped;
+      }
+    }
+
+    const data = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+    switch (eventName) {
+      case 'processing':
+        return {
+          type: 'synthesis_start',
+          message: (data.message as string) || 'Processing clinical query...',
+        };
+      case 'progress':
+        return {
+          type: 'agent_progress',
+          agent: (data.phase as string) || 'orchestrator',
+          progress: typeof data.progress === 'number' ? data.progress : 15,
+          message: (data.message as string) || 'Planning query orchestration...',
+        };
+      case 'agent_result':
+        return {
+          type: 'agent_complete',
+          agent: (data.agent as string) || 'agent',
+          progress: 100,
+          message: (data.summary as string) || `${(data.agent as string) || 'Agent'} completed`,
+        };
+      case 'drug_alerts': {
+        const alerts = Array.isArray(data.alerts) ? data.alerts.length : 0;
+        return {
+          type: 'validation_complete',
+          message: `${alerts} drug alert(s) identified.`,
+        };
+      }
+      case 'complete':
+        return {
+          type: 'synthesis_complete',
+          response: payload as ClinicalResponse,
+          message: 'Clinical response completed.',
+        };
+      case 'error':
+        return {
+          type: 'error',
+          message: (data.message as string) || 'Streaming query failed',
+          agent: data.agent as string | undefined,
+        };
+      default:
+        return null;
     }
   };
 
-  eventSource.onerror = (event) => {
-    onError(new Error(event instanceof ErrorEvent ? event.message : 'Connection error'));
+  const parsePayload = (raw: string): unknown => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  };
+
+  const closeConnection = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
     eventSource.close();
     onComplete();
   };
 
+  const handleEventPayload = (eventName: string, raw: string) => {
+    const payload = parsePayload(raw);
+    const normalized = normalizeUpdate(eventName, payload);
+    if (normalized) {
+      onMessage(normalized);
+    }
+    if (eventName === 'complete') {
+      closeConnection();
+    }
+  };
+
+  eventSource.onmessage = (event) => {
+    handleEventPayload('message', event.data);
+  };
+
+  const namedEventTypes = ['processing', 'progress', 'agent_result', 'drug_alerts', 'complete', 'error'] as const;
+  namedEventTypes.forEach((eventName) => {
+    eventSource.addEventListener(eventName, (event) => {
+      const messageEvent = event as MessageEvent<string>;
+      handleEventPayload(eventName, messageEvent.data);
+    });
+  });
+
+  eventSource.onerror = (event) => {
+    if (closed) {
+      return;
+    }
+    onError(new Error(event instanceof ErrorEvent ? event.message : 'Connection error'));
+    closeConnection();
+  };
+
   return () => {
-    eventSource.close();
-    onComplete();
+    closeConnection();
   };
 }
