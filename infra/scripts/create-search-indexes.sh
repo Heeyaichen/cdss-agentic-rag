@@ -55,12 +55,25 @@ create_index() {
   index_name="$(echo "${index_json}" | python3 -c "import sys, json; print(json.load(sys.stdin)['name'])")"
   echo "[INFO] Creating/updating index: ${index_name}"
 
-  az rest \
-    --method put \
-    --url "${SEARCH_ENDPOINT}/indexes/${index_name}?api-version=${API_VERSION}" \
-    --headers "Content-Type=application/json" "api-key=${SEARCH_ADMIN_KEY}" \
-    --body "${index_json}" \
-    --output none
+  local rest_output=""
+  if ! rest_output="$(
+    AZURE_CORE_ONLY_SHOW_ERRORS=1 az rest \
+      --method put \
+      --url "${SEARCH_ENDPOINT}/indexes/${index_name}?api-version=${API_VERSION}" \
+      --skip-authorization-header \
+      --headers "Content-Type=application/json" "api-key=${SEARCH_ADMIN_KEY}" \
+      --body "${index_json}" \
+      --output none 2>&1
+  )"; then
+    if [[ "${rest_output}" == *"publicNetworkAccess: Disabled"* || "${rest_output}" == *"source is not allowed by applicable rules"* ]]; then
+      echo "[ERROR] Azure AI Search is private-network-only from this client path."
+      echo "[ERROR] Run index bootstrap from a host inside the VNet, or temporarily allow public access."
+      return 42
+    fi
+
+    echo "${rest_output}"
+    return 1
+  fi
 }
 
 PATIENT_RECORDS_INDEX='{
@@ -91,9 +104,9 @@ PATIENT_RECORDS_INDEX='{
       {
         "name": "patient-records-semantic",
         "prioritizedFields": {
-          "contentFields": [{"fieldName": "content"}],
-          "titleFields": [{"fieldName": "document_type"}],
-          "keywordsFields": [{"fieldName": "entity_names"}]
+          "titleField": {"fieldName": "document_type"},
+          "prioritizedContentFields": [{"fieldName": "content"}],
+          "prioritizedKeywordsFields": [{"fieldName": "entity_names"}]
         }
       }
     ]
@@ -131,9 +144,9 @@ TREATMENT_PROTOCOLS_INDEX='{
       {
         "name": "protocols-semantic",
         "prioritizedFields": {
-          "contentFields": [{"fieldName": "content"}],
-          "titleFields": [{"fieldName": "guideline_name"}],
-          "keywordsFields": [{"fieldName": "specialty"}]
+          "titleField": {"fieldName": "guideline_name"},
+          "prioritizedContentFields": [{"fieldName": "content"}],
+          "prioritizedKeywordsFields": [{"fieldName": "specialty"}]
         }
       }
     ]
@@ -172,9 +185,9 @@ MEDICAL_LITERATURE_INDEX='{
       {
         "name": "literature-semantic",
         "prioritizedFields": {
-          "contentFields": [{"fieldName": "content"}],
-          "titleFields": [{"fieldName": "title"}],
-          "keywordsFields": [{"fieldName": "mesh_terms"}]
+          "titleField": {"fieldName": "title"},
+          "prioritizedContentFields": [{"fieldName": "content"}],
+          "prioritizedKeywordsFields": [{"fieldName": "mesh_terms"}]
         }
       }
     ]

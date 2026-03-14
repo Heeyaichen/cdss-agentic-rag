@@ -15,10 +15,6 @@ set -euo pipefail
 RESOURCE_GROUP="${1:-cdss-prod-rg}"
 CONTAINER_APP_NAME="${2:-}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}/../.."
-SAMPLE_DATA_DIR="${REPO_ROOT}/sample_data"
-
 log_info() {
     echo "[INFO] $1"
 }
@@ -31,14 +27,6 @@ log_error() {
     echo "[ERROR] $1"
 }
 
-require_file() {
-    local path="$1"
-    if [[ ! -f "$path" ]]; then
-        log_error "Required sample file not found: $path"
-        exit 1
-    fi
-}
-
 if ! command -v az >/dev/null 2>&1; then
     log_error "Azure CLI is required."
     exit 1
@@ -48,10 +36,6 @@ if ! az account show >/dev/null 2>&1; then
     log_error "Not logged in to Azure CLI. Run: az login"
     exit 1
 fi
-
-require_file "${SAMPLE_DATA_DIR}/sample_patient.json"
-require_file "${SAMPLE_DATA_DIR}/sample_protocol.md"
-require_file "${SAMPLE_DATA_DIR}/sample_lab_report.txt"
 
 if [[ -z "${CONTAINER_APP_NAME}" ]]; then
     CONTAINER_APP_NAME="$(az containerapp list --resource-group "${RESOURCE_GROUP}" --query "[?contains(name, '-api')].name | [0]" -o tsv)"
@@ -64,7 +48,7 @@ if [[ -z "${CONTAINER_APP_NAME}" ]]; then
 fi
 
 log_info "Using Container App: ${CONTAINER_APP_NAME}"
-log_info "Encoding sample payloads..."
+log_info "Preparing compact in-network seeding payload..."
 
 KEYVAULT_NAME="$(az keyvault list --resource-group "${RESOURCE_GROUP}" --query "[0].name" -o tsv 2>/dev/null || true)"
 MANAGED_IDENTITY_ID="$(az containerapp show --resource-group "${RESOURCE_GROUP}" --name "${CONTAINER_APP_NAME}" --query "keys(identity.userAssignedIdentities)[0]" -o tsv 2>/dev/null || true)"
@@ -165,88 +149,9 @@ fi
 
 log_info "Using revision: ${ACTIVE_REVISION}"
 
-PATIENT_JSON_B64="$(base64 < "${SAMPLE_DATA_DIR}/sample_patient.json" | tr -d '\n')"
-PROTOCOL_MD_B64="$(base64 < "${SAMPLE_DATA_DIR}/sample_protocol.md" | tr -d '\n')"
-LAB_REPORT_B64="$(base64 < "${SAMPLE_DATA_DIR}/sample_lab_report.txt" | tr -d '\n')"
-
-REMOTE_PYTHON_SCRIPT=$(cat <<PY
-import base64
-import json
-import os
-import sys
-from datetime import datetime, timezone
-
-from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient
-
-def decode_text(value: str) -> str:
-    return base64.b64decode(value.encode()).decode()
-
-def decode_json(value: str) -> dict:
-    return json.loads(decode_text(value))
-
-patient = decode_json("${PATIENT_JSON_B64}")
-protocol_md = decode_text("${PROTOCOL_MD_B64}")
-lab_report = decode_text("${LAB_REPORT_B64}")
-
-cosmos_conn = os.getenv("CDSS_AZURE_COSMOS_CONNECTION_STRING", "")
-cosmos_endpoint = os.getenv("CDSS_AZURE_COSMOS_ENDPOINT", "")
-cosmos_key = os.getenv("CDSS_AZURE_COSMOS_KEY", "")
-cosmos_use_entra_id = os.getenv("CDSS_AZURE_COSMOS_USE_ENTRA_ID", "false").lower() == "true"
-cosmos_db = os.getenv("CDSS_AZURE_COSMOS_DATABASE_NAME", "cdss-db")
-
-storage_conn = os.getenv("CDSS_AZURE_BLOB_CONNECTION_STRING", "")
-storage_endpoint = os.getenv("CDSS_AZURE_BLOB_ENDPOINT", "")
-storage_use_entra_id = os.getenv("CDSS_AZURE_BLOB_USE_ENTRA_ID", "false").lower() == "true"
-
-if cosmos_conn:
-    cosmos_client = CosmosClient.from_connection_string(cosmos_conn)
-elif cosmos_key and cosmos_endpoint:
-    cosmos_client = CosmosClient(cosmos_endpoint, cosmos_key)
-elif cosmos_endpoint and cosmos_use_entra_id:
-    cosmos_client = CosmosClient(cosmos_endpoint, DefaultAzureCredential())
-else:
-    print("[ERROR] Cosmos configuration is incomplete in Container App.")
-    print("        Expected CDSS_AZURE_COSMOS_ENDPOINT with key or Entra ID settings.")
-    sys.exit(1)
-
-print("[INFO] Seeding Cosmos DB...")
-
-database = cosmos_client.get_database_client(cosmos_db)
-profiles = database.get_container_client("patient-profiles")
-patient["updated_at"] = datetime.now(timezone.utc).isoformat()
-patient.setdefault("created_at", patient["updated_at"])
-profiles.upsert_item(patient)
-print("[SUCCESS] Upserted patient profile:", patient.get("id", "unknown"))
-
-print("[INFO] Seeding Blob Storage...")
-if storage_conn:
-    blob_client = BlobServiceClient.from_connection_string(storage_conn)
-elif storage_endpoint and storage_use_entra_id:
-    blob_client = BlobServiceClient(account_url=storage_endpoint, credential=DefaultAzureCredential())
-else:
-    print("[ERROR] Blob Storage configuration is incomplete in Container App.")
-    print("        Set CDSS_AZURE_BLOB_CONNECTION_STRING or CDSS_AZURE_BLOB_ENDPOINT + CDSS_AZURE_BLOB_USE_ENTRA_ID=true.")
-    sys.exit(1)
-
-blob_client.get_blob_client(
-    container="treatment-protocols",
-    blob="ENDO-DM-CKD-2025-v3.md",
-).upload_blob(protocol_md, overwrite=True)
-
-blob_client.get_blob_client(
-    container="staging-documents",
-    blob="lab_report_patient_12345_20260128.txt",
-).upload_blob(lab_report, overwrite=True)
-
-print("[SUCCESS] Uploaded protocol and lab report blobs.")
-print("[SUCCESS] In-network sample data seeding completed.")
-PY
-)
-
-REMOTE_PYTHON_B64="$(printf "%s" "${REMOTE_PYTHON_SCRIPT}" | base64 | tr -d '\n')"
-REMOTE_COMMAND="python -c \"import base64; exec(base64.b64decode('${REMOTE_PYTHON_B64}').decode())\""
+REMOTE_COMMAND="python -c \"import os;from datetime import datetime,timezone;from azure.cosmos import CosmosClient;from azure.identity import DefaultAzureCredential;from azure.storage.blob import BlobServiceClient;cred=DefaultAzureCredential();db=CosmosClient(os.environ['CDSS_AZURE_COSMOS_ENDPOINT'],cred).get_database_client(os.getenv('CDSS_AZURE_COSMOS_DATABASE_NAME','cdss-db'));now=datetime.now(timezone.utc).isoformat();patient={'id':'patient_12345','patient_id':'patient_12345','name':'Jane Doe','conditions':['T2DM','CKD3'],'medications':['Metformin','Lisinopril'],'created_at':now,'updated_at':now};db.get_container_client('patient-profiles').upsert_item(patient);blob=BlobServiceClient(account_url=os.environ['CDSS_AZURE_BLOB_ENDPOINT'],credential=cred);blob.get_blob_client(container='treatment-protocols',blob='ENDO-DM-CKD-2025-v3.md').upload_blob('Protocol seed content',overwrite=True);blob.get_blob_client(container='staging-documents',blob='lab_report_patient_12345_20260128.txt').upload_blob('HbA1c 8.4; eGFR 42; UACR 110',overwrite=True);print('Seeding completed')\""
+REMOTE_COMMAND_LENGTH=${#REMOTE_COMMAND}
+log_info "Remote command length: ${REMOTE_COMMAND_LENGTH} characters"
 
 log_info "Executing seeding payload inside Container App network..."
 az containerapp exec \

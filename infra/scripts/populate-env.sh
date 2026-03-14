@@ -253,7 +253,7 @@ CDSS_REDIS_URL=$REDIS_URL
 # ── Application Settings ─────────────────────────────────────────────────────
 CDSS_DEBUG=false
 CDSS_LOG_LEVEL=INFO
-CDSS_CORS_ORIGINS=["http://localhost:3000"]
+CDSS_CORS_ORIGINS=["http://localhost:3000","http://localhost:3001"]
 CDSS_CORS_ALLOW_METHODS=["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
 CDSS_CORS_ALLOW_HEADERS=["Authorization","Content-Type","X-Request-ID"]
 CDSS_CORS_EXPOSE_HEADERS=["X-Request-ID","X-Trace-ID"]

@@ -4,13 +4,14 @@
 # ============================================================================
 #
 # Usage:
-#   ./deploy.sh <environment> <resource-group> [location] [prod-public-api]
+#   ./deploy.sh <environment> <resource-group> [location] [prod-public-api] [container-image]
 #
 # Examples:
 #   ./deploy.sh dev cdss-dev-rg eastus2
 #   ./deploy.sh staging cdss-staging-rg eastus2
 #   ./deploy.sh prod cdss-prod-rg eastus2
 #   ./deploy.sh prod cdss-prod-rg eastus2 true
+#   ./deploy.sh prod cdss-prod-rg eastus2 true myacr.azurecr.io/cdss-api:2026.03.14
 #
 # Prerequisites:
 #   - Azure CLI installed and logged in (az login)
@@ -49,15 +50,24 @@ ENVIRONMENT="${1:-}"
 RESOURCE_GROUP="${2:-}"
 LOCATION="${3:-eastus2}"
 PROD_PUBLIC_API_OVERRIDE="${4:-${PROD_PUBLIC_API:-}}"
+CONTAINER_IMAGE_OVERRIDE="${5:-${CONTAINER_IMAGE:-}}"
+ACR_NAME_OVERRIDE="${ACR_NAME:-}"
+ACR_CREATE_OVERRIDE="${ACR_CREATE:-}"
+ACR_SKU_OVERRIDE="${ACR_SKU:-}"
+DEFAULT_PLACEHOLDER_IMAGE="cdssacr.azurecr.io/cdss-api:latest"
+PARAMS_PARSE_AVAILABLE="false"
+PARAMS_CONTAINER_IMAGE=""
+EFFECTIVE_CONTAINER_IMAGE=""
 
 if [[ -z "$ENVIRONMENT" || -z "$RESOURCE_GROUP" ]]; then
-    echo "Usage: $0 <environment> <resource-group> [location] [prod-public-api]"
+    echo "Usage: $0 <environment> <resource-group> [location] [prod-public-api] [container-image]"
     echo ""
     echo "Arguments:"
     echo "  environment     Target environment: dev, staging, or prod"
     echo "  resource-group  Azure resource group name"
     echo "  location        Azure region (default: eastus2)"
     echo "  prod-public-api Optional true/false override for prod API exposure"
+    echo "  container-image Optional container image override (or use CONTAINER_IMAGE env var)"
     echo ""
     echo "Examples:"
     echo "  $0 dev cdss-dev-rg"
@@ -66,6 +76,7 @@ if [[ -z "$ENVIRONMENT" || -z "$RESOURCE_GROUP" ]]; then
     echo ""
     echo "Environment variable alternative:"
     echo "  PROD_PUBLIC_API=true $0 prod cdss-prod-rg"
+    echo "  CONTAINER_IMAGE=<acr>.azurecr.io/cdss-api:<tag> ACR_CREATE=true $0 prod <rg>"
     exit 1
 fi
 
@@ -77,6 +88,16 @@ fi
 
 if [[ -n "$PROD_PUBLIC_API_OVERRIDE" && "$PROD_PUBLIC_API_OVERRIDE" != "true" && "$PROD_PUBLIC_API_OVERRIDE" != "false" ]]; then
     log_error "Invalid prod-public-api value: $PROD_PUBLIC_API_OVERRIDE. Must be true or false."
+    exit 1
+fi
+
+if [[ -n "$ACR_CREATE_OVERRIDE" && "$ACR_CREATE_OVERRIDE" != "true" && "$ACR_CREATE_OVERRIDE" != "false" ]]; then
+    log_error "Invalid ACR_CREATE value: $ACR_CREATE_OVERRIDE. Must be true or false."
+    exit 1
+fi
+
+if [[ -n "$ACR_SKU_OVERRIDE" && "$ACR_SKU_OVERRIDE" != "Basic" && "$ACR_SKU_OVERRIDE" != "Standard" && "$ACR_SKU_OVERRIDE" != "Premium" ]]; then
+    log_error "Invalid ACR_SKU value: $ACR_SKU_OVERRIDE. Must be one of: Basic, Standard, Premium."
     exit 1
 fi
 
@@ -102,6 +123,44 @@ get_deployment_output() {
         --resource-group "${RESOURCE_GROUP}" \
         --query "properties.outputs.${output_name}.value" \
         --output tsv 2>/dev/null || true
+}
+
+derive_acr_name_from_image() {
+    local image_ref="$1"
+    local registry_host
+    registry_host="${image_ref%%/*}"
+    if [[ "$registry_host" == *.azurecr.io ]]; then
+        echo "${registry_host%%.azurecr.io}"
+    fi
+}
+
+parse_param_value() {
+    local key="$1"
+    if [[ "${PARAMS_PARSE_AVAILABLE}" != "true" ]]; then
+        return 0
+    fi
+    jq -r --arg key "$key" '.parameters[$key].value // empty' "$PARAMS_FILE" 2>/dev/null || true
+}
+
+verify_acr_image_exists() {
+    local image_ref="$1"
+    local registry_host image_path acr_name
+
+    registry_host="${image_ref%%/*}"
+    image_path="${image_ref#*/}"
+
+    if [[ "$registry_host" != *.azurecr.io || "$image_path" == "$image_ref" ]]; then
+        return 0
+    fi
+
+    acr_name="${registry_host%%.azurecr.io}"
+    if ! az acr repository show --name "$acr_name" --image "$image_path" --output none >/dev/null 2>&1; then
+        log_error "Container image not found in ACR: ${image_ref}"
+        log_error "Push the exact tag first, then redeploy."
+        return 1
+    fi
+
+    return 0
 }
 
 validate_private_networking() {
@@ -196,6 +255,49 @@ if [[ ! -f "$PARAMS_FILE" ]]; then
     PARAMS_FILE=""
 fi
 
+if [[ -n "$PARAMS_FILE" && -f "$PARAMS_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    PARAMS_PARSE_AVAILABLE="true"
+    PARAMS_CONTAINER_IMAGE="$(parse_param_value "containerImage")"
+fi
+
+if [[ -n "$CONTAINER_IMAGE_OVERRIDE" ]]; then
+    EFFECTIVE_CONTAINER_IMAGE="$CONTAINER_IMAGE_OVERRIDE"
+elif [[ -n "$PARAMS_CONTAINER_IMAGE" ]]; then
+    EFFECTIVE_CONTAINER_IMAGE="$PARAMS_CONTAINER_IMAGE"
+fi
+
+if [[ -n "$EFFECTIVE_CONTAINER_IMAGE" && "$EFFECTIVE_CONTAINER_IMAGE" == "$DEFAULT_PLACEHOLDER_IMAGE" ]]; then
+    if [[ "$ENVIRONMENT" == "prod" ]]; then
+        log_error "Container image is still the placeholder: ${DEFAULT_PLACEHOLDER_IMAGE}"
+        log_error "Set a real image before production deployment."
+        echo "Example:"
+        echo "  CONTAINER_IMAGE=<acr>.azurecr.io/cdss-api:<tag> ACR_NAME=<acr> ACR_CREATE=true $0 prod ${RESOURCE_GROUP} ${LOCATION} ${PROD_PUBLIC_API_OVERRIDE:-false}"
+        exit 1
+    fi
+    log_warn "Container image is still the placeholder: ${DEFAULT_PLACEHOLDER_IMAGE}"
+fi
+
+if [[ -n "$EFFECTIVE_CONTAINER_IMAGE" ]]; then
+    if ! verify_acr_image_exists "$EFFECTIVE_CONTAINER_IMAGE"; then
+        exit 1
+    fi
+fi
+
+if [[ "$ACR_CREATE_OVERRIDE" == "true" && -z "$ACR_NAME_OVERRIDE" ]]; then
+    if [[ -n "$EFFECTIVE_CONTAINER_IMAGE" ]]; then
+        ACR_NAME_OVERRIDE="$(derive_acr_name_from_image "$EFFECTIVE_CONTAINER_IMAGE")"
+    fi
+    if [[ -z "$ACR_NAME_OVERRIDE" ]]; then
+        log_error "ACR_CREATE=true requires ACR_NAME or an Azure Container Registry image (e.g., *.azurecr.io/repo:tag)."
+        exit 1
+    fi
+fi
+
+if [[ "$ACR_CREATE_OVERRIDE" == "true" && -z "$CONTAINER_IMAGE_OVERRIDE" && "$EFFECTIVE_CONTAINER_IMAGE" == "$DEFAULT_PLACEHOLDER_IMAGE" ]]; then
+    log_warn "ACR_CREATE=true set without a real container image."
+    log_warn "ACR will be created, but Container App revision creation will fail until the image is pushed."
+fi
+
 # --- Confirmation for production ---
 if [[ "$ENVIRONMENT" == "prod" ]]; then
     echo ""
@@ -206,6 +308,22 @@ if [[ "$ENVIRONMENT" == "prod" ]]; then
     log_warn "Resource Group: ${RESOURCE_GROUP}"
     log_warn "Location:       ${LOCATION}"
     log_warn "Subscription:   ${SUBSCRIPTION_NAME}"
+    if [[ -n "$EFFECTIVE_CONTAINER_IMAGE" ]]; then
+        if [[ -n "$CONTAINER_IMAGE_OVERRIDE" ]]; then
+            log_warn "Container Img:  ${EFFECTIVE_CONTAINER_IMAGE} (override)"
+        else
+            log_warn "Container Img:  ${EFFECTIVE_CONTAINER_IMAGE} (params)"
+        fi
+    fi
+    if [[ "$ACR_CREATE_OVERRIDE" == "true" ]]; then
+        log_warn "ACR Provision:  CREATE via IaC (ACR_CREATE=true)"
+        if [[ -n "$ACR_NAME_OVERRIDE" ]]; then
+            log_warn "ACR Name:       ${ACR_NAME_OVERRIDE}"
+        fi
+        if [[ -n "$ACR_SKU_OVERRIDE" ]]; then
+            log_warn "ACR SKU:        ${ACR_SKU_OVERRIDE}"
+        fi
+    fi
     if [[ -n "$PROD_PUBLIC_API_OVERRIDE" ]]; then
         if [[ "$PROD_PUBLIC_API_OVERRIDE" == "true" ]]; then
             log_warn "API Exposure:   PUBLIC (override)"
@@ -239,6 +357,7 @@ fi
 # --- Validate Bicep template ---
 log_info "Validating Bicep template..."
 refresh_extra_bicep_params() {
+    local effective_acr_name="$ACR_NAME_OVERRIDE"
     EXTRA_BICEP_PARAMS=""
 
     if [[ "$OPENAI_RESTORE_ENABLED" == "true" ]]; then
@@ -251,6 +370,24 @@ refresh_extra_bicep_params() {
 
     if [[ "$ENVIRONMENT" == "prod" && -n "$PROD_PUBLIC_API_OVERRIDE" ]]; then
         EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} prodPublicApi=${PROD_PUBLIC_API_OVERRIDE}"
+    fi
+
+    if [[ -n "$CONTAINER_IMAGE_OVERRIDE" ]]; then
+        EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} containerImage=${CONTAINER_IMAGE_OVERRIDE}"
+        if [[ -z "$effective_acr_name" ]]; then
+            effective_acr_name="$(derive_acr_name_from_image "$CONTAINER_IMAGE_OVERRIDE")"
+        fi
+    fi
+
+    if [[ -n "$effective_acr_name" ]]; then
+        EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} acrUseManagedIdentity=true acrName=${effective_acr_name}"
+    fi
+
+    if [[ "$ACR_CREATE_OVERRIDE" == "true" ]]; then
+        EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} acrCreate=true"
+        if [[ -n "$ACR_SKU_OVERRIDE" ]]; then
+            EXTRA_BICEP_PARAMS="${EXTRA_BICEP_PARAMS} acrSku=${ACR_SKU_OVERRIDE}"
+        fi
     fi
 
     EXTRA_BICEP_PARAMS="$(echo "$EXTRA_BICEP_PARAMS" | xargs)"
@@ -466,7 +603,23 @@ fi
 
 log_info "Ensuring Azure AI Search indexes exist..."
 chmod +x "${CREATE_INDEX_SCRIPT}"
-"${CREATE_INDEX_SCRIPT}" "${RESOURCE_GROUP}" "${SEARCH_NAME}"
+set +e
+INDEX_SCRIPT_OUTPUT=$("${CREATE_INDEX_SCRIPT}" "${RESOURCE_GROUP}" "${SEARCH_NAME}" 2>&1)
+INDEX_SCRIPT_STATUS=$?
+set -e
+
+if [[ ${INDEX_SCRIPT_STATUS} -ne 0 ]]; then
+    if [[ "${ENVIRONMENT}" == "prod" && ${INDEX_SCRIPT_STATUS} -eq 42 ]]; then
+        log_warn "Search index bootstrap could not run from this client due to private-network restrictions."
+        echo "${INDEX_SCRIPT_OUTPUT}"
+        log_warn "Infrastructure deployment is successful. Index bootstrap is still pending."
+        log_warn "Run index bootstrap from a VNet-connected runner, or temporarily enable Search public access, create indexes, then disable it."
+    else
+        echo "${INDEX_SCRIPT_OUTPUT}"
+        log_error "Search index bootstrap failed."
+        exit 1
+    fi
+fi
 
 if [[ "${ENVIRONMENT}" == "prod" ]]; then
     log_info "Validating private endpoint/network settings for production..."
@@ -591,7 +744,7 @@ CDSS_REDIS_URL=${REDIS_URL}
 # ── Application Settings ─────────────────────────────────────────────────────
 CDSS_DEBUG=false
 CDSS_LOG_LEVEL=INFO
-CDSS_CORS_ORIGINS=["http://localhost:3000"]
+CDSS_CORS_ORIGINS=["http://localhost:3000","http://localhost:3001"]
 CDSS_CORS_ALLOW_METHODS=["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
 CDSS_CORS_ALLOW_HEADERS=["Authorization","Content-Type","X-Request-ID"]
 CDSS_CORS_EXPOSE_HEADERS=["X-Request-ID","X-Trace-ID"]

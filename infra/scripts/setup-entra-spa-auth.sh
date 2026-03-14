@@ -2,7 +2,7 @@
 # Configure Entra app registrations for CDSS frontend <-> API auth.
 #
 # What this script does:
-# 1) Ensures SPA redirect URIs include localhost:5173.
+# 1) Ensures SPA redirect URIs include localhost dev ports (3000/3001).
 # 2) Resolves or creates API app registration.
 # 3) Ensures API identifier URI and delegated scope exist.
 # 4) Grants SPA delegated permission to API scope.
@@ -39,6 +39,7 @@ SPA_APP_DISPLAY_NAME="cdss-frontend-spa"
 API_APP_ID=""
 API_APP_DISPLAY_NAME="cdss-api"
 API_APP_ID_URI="api://cdss-api"
+API_APP_ID_URI_EXPLICIT="false"
 SCOPE_NAME="access_as_user"
 RESOURCE_GROUP=""
 CONTAINER_APP_NAME=""
@@ -51,6 +52,37 @@ log_info() { echo "[INFO] $1"; }
 log_warn() { echo "[WARN] $1"; }
 log_error() { echo "[ERROR] $1"; }
 log_success() { echo "[SUCCESS] $1"; }
+
+resolve_container_app_name() {
+    local rg="$1"
+    local app_name="$2"
+
+    if [[ -n "${app_name}" || -z "${rg}" ]]; then
+        echo "${app_name}"
+        return 0
+    fi
+
+    az containerapp list \
+        --resource-group "${rg}" \
+        --query "[?contains(name,'-api')].name | [0]" \
+        -o tsv 2>/dev/null || true
+}
+
+get_container_app_env_value() {
+    local rg="$1"
+    local app="$2"
+    local env_name="$3"
+
+    if [[ -z "${rg}" || -z "${app}" || -z "${env_name}" ]]; then
+        return 0
+    fi
+
+    az containerapp show \
+        --resource-group "${rg}" \
+        --name "${app}" \
+        --query "properties.template.containers[0].env[?name=='${env_name}'].value | [0]" \
+        -o tsv 2>/dev/null || true
+}
 
 find_api_app_by_identifier_uri() {
     local identifier_uri="$1"
@@ -151,6 +183,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --api-app-id-uri)
             API_APP_ID_URI="${2:-}"
+            API_APP_ID_URI_EXPLICIT="true"
             shift 2
             ;;
         --scope-name)
@@ -211,6 +244,20 @@ fi
 TENANT_ID="$(az account show --query tenantId -o tsv)"
 log_info "Tenant ID: ${TENANT_ID}"
 
+if [[ "${API_APP_ID_URI_EXPLICIT}" != "true" ]]; then
+    CONTAINER_APP_NAME="$(resolve_container_app_name "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}")"
+
+    if [[ -n "${RESOURCE_GROUP}" && -n "${CONTAINER_APP_NAME}" ]]; then
+        BACKEND_AUTH_AUDIENCE="$(get_container_app_env_value "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}" "CDSS_AUTH_AUDIENCE")"
+        if [[ -n "${BACKEND_AUTH_AUDIENCE}" && "${BACKEND_AUTH_AUDIENCE}" != "None" ]]; then
+            API_APP_ID_URI="${BACKEND_AUTH_AUDIENCE}"
+            log_info "Using backend CDSS_AUTH_AUDIENCE as API identifier URI default: ${API_APP_ID_URI}"
+        else
+            log_info "Backend CDSS_AUTH_AUDIENCE is empty; using script default: ${API_APP_ID_URI}"
+        fi
+    fi
+fi
+
 # Resolve/create SPA app when not explicitly provided.
 if [[ -z "${SPA_APP_ID}" ]]; then
     SPA_APP_ID="$(az ad app list --display-name "${SPA_APP_DISPLAY_NAME}" --query "[0].appId" -o tsv 2>/dev/null || true)"
@@ -218,7 +265,7 @@ fi
 
 if [[ -z "${SPA_APP_ID}" ]]; then
     SPA_APP_ID="$(az ad app list --all \
-        --query "[?spa && spa.redirectUris && contains(join(',',spa.redirectUris), 'localhost:5173')].appId | [0]" \
+        --query "[?spa && spa.redirectUris && (contains(join(',',spa.redirectUris), 'localhost:3000') || contains(join(',',spa.redirectUris), 'localhost:3001'))].appId | [0]" \
         -o tsv 2>/dev/null || true)"
 fi
 
@@ -250,7 +297,12 @@ spa_app_id = sys.argv[1]
 cmd = ["az", "ad", "app", "show", "--id", spa_app_id, "--query", "spa.redirectUris", "-o", "json"]
 out = subprocess.check_output(cmd, text=True)
 uris = json.loads(out or "[]") or []
-needed = ["http://localhost:5173", "https://localhost:5173"]
+needed = [
+    "http://localhost:3000",
+    "https://localhost:3000",
+    "http://localhost:3001",
+    "https://localhost:3001",
+]
 for u in needed:
     if u not in uris:
         uris.append(u)
@@ -258,7 +310,7 @@ print(json.dumps({"spa": {"redirectUris": uris}}, separators=(",", ":")))
 PY
 )"
 
-log_info "Ensuring SPA redirect URIs include localhost:5173..."
+log_info "Ensuring SPA redirect URIs include localhost dev ports..."
 az rest \
     --method PATCH \
     --uri "https://graph.microsoft.com/v1.0/applications/${SPA_OBJ_ID}" \
@@ -433,9 +485,7 @@ build_api_base_url() {
     fi
 }
 
-if [[ -n "${RESOURCE_GROUP}" && -z "${CONTAINER_APP_NAME}" ]]; then
-    CONTAINER_APP_NAME="$(az containerapp list --resource-group "${RESOURCE_GROUP}" --query "[?contains(name,'-api')].name | [0]" -o tsv 2>/dev/null || true)"
-fi
+CONTAINER_APP_NAME="$(resolve_container_app_name "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}")"
 
 if [[ -n "${RESOURCE_GROUP}" && -n "${CONTAINER_APP_NAME}" ]]; then
     sync_backend_auth_audience "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}" "${API_APP_ID_URI}"
