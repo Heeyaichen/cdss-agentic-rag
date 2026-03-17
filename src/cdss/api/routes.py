@@ -6,7 +6,6 @@ conversations, document ingestion, drug safety, search, and admin/health.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -443,7 +442,7 @@ async def search_patients(
     search: str | None = Query(None, description="Search query string."),
     page: int = Query(1, ge=1, le=100, description="Page number."),
     limit: int = Query(100, description="Maximum results per page."),
-    _service: ClinicalQueryService = Depends(get_query_service),
+    service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
     """Search patients by name and other criteria.
 
@@ -456,119 +455,16 @@ async def search_patients(
     Returns:
         Dictionary with pagination metadata and patient list.
     """
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # Mock data for local testing without Azure services.
-    # Shape aligns with PatientProfile used by the frontend.
-    mock_patients = [
-        {
-            "id": "patient-001",
-            "patient_id": "patient_001",
-            "doc_type": "patient_profile",
-            "demographics": {
-                "age": 65,
-                "sex": "male",
-                "weight_kg": 84,
-                "height_cm": 176,
-            },
-            "active_conditions": [
-                {
-                    "code": "E11.9",
-                    "coding_system": "ICD-10",
-                    "display": "Type 2 Diabetes Mellitus",
-                    "status": "active",
-                },
-                {
-                    "code": "I10",
-                    "coding_system": "ICD-10",
-                    "display": "Hypertension",
-                    "status": "active",
-                },
-            ],
-            "active_medications": [
-                {
-                    "rxcui": "860975",
-                    "name": "Metformin",
-                    "dose": "500 mg",
-                    "frequency": "BID",
-                },
-                {
-                    "rxcui": "29046",
-                    "name": "Lisinopril",
-                    "dose": "10 mg",
-                    "frequency": "QD",
-                },
-            ],
-            "allergies": [
-                {"substance": "Penicillin", "reaction": "Rash", "severity": "moderate"},
-            ],
-            "recent_labs": [],
-            "last_updated": now_iso,
-        },
-        {
-            "id": "patient-002",
-            "patient_id": "patient_002",
-            "doc_type": "patient_profile",
-            "demographics": {
-                "age": 58,
-                "sex": "female",
-                "weight_kg": 73,
-                "height_cm": 162,
-            },
-            "active_conditions": [
-                {
-                    "code": "N18.30",
-                    "coding_system": "ICD-10",
-                    "display": "CKD Stage 3",
-                    "status": "active",
-                },
-                {
-                    "code": "E78.5",
-                    "coding_system": "ICD-10",
-                    "display": "Hyperlipidemia",
-                    "status": "active",
-                },
-            ],
-            "active_medications": [
-                {
-                    "rxcui": "1488563",
-                    "name": "Empagliflozin",
-                    "dose": "10 mg",
-                    "frequency": "QD",
-                },
-            ],
-            "allergies": [],
-            "recent_labs": [],
-            "last_updated": now_iso,
-        },
-    ]
-
-    # Filter by search query if provided
-    filtered_patients = mock_patients
-    if search:
-        search_lower = search.lower()
-        filtered_patients = [
-            p
-            for p in mock_patients
-            if (
-                search_lower in p["patient_id"].lower()
-                or any(search_lower in c["display"].lower() for c in p["active_conditions"])
-                or any(search_lower in m["name"].lower() for m in p["active_medications"])
-            )
-        ]
-
-    # Pagination
-    start_idx = (page - 1) * limit
-    end_idx = start_idx + limit
-    paginated_patients = filtered_patients[start_idx:end_idx]
-
-    return {
-        "patients": paginated_patients,
-        "page": page,
-        "page_size": limit,
-        "limit": limit,
-        "total": len(filtered_patients),
-    }
+    try:
+        return await service.search_patients(
+            search=search,
+            page=page,
+            limit=limit,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.message) from exc
+    except AzureServiceError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
 
 
 @router.get(
@@ -738,6 +634,7 @@ async def ingest_document(
         description="Optional JSON metadata payload as string.",
     ),
     background_tasks: BackgroundTasks = None,
+    service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
     """Ingest a medical document (PDF) for processing.
 
@@ -789,15 +686,24 @@ async def ingest_document(
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {exc}") from exc
 
-    # Validate document_type
-    valid_document_types = {"protocol", "patient_record", "literature"}
-    if document_type not in valid_document_types:
+    document_type_map = {
+        "patient_record": "generic",
+        "protocol": "clinical_guideline",
+        "literature": "pubmed_abstract",
+        "lab_report": "lab_report",
+        "prescription": "prescription",
+        "discharge_summary": "discharge_summary",
+        "radiology_report": "radiology_report",
+        "clinical_guideline": "clinical_guideline",
+        "pubmed_abstract": "pubmed_abstract",
+        "generic": "generic",
+    }
+    if document_type not in document_type_map:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Invalid document_type '{document_type}'. Valid types: {', '.join(sorted(valid_document_types))}."
-            ),
+            detail=(f"Invalid document_type '{document_type}'. Valid types: {', '.join(sorted(document_type_map))}."),
         )
+    normalized_document_type = document_type_map[document_type]
 
     document_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -816,6 +722,7 @@ async def ingest_document(
         "document_id": document_id,
         "filename": file.filename,
         "document_type": document_type,
+        "normalized_document_type": normalized_document_type,
         "patient_id": patient_id,
         "metadata": metadata_payload or {},
         "status": "pending",
@@ -829,38 +736,47 @@ async def ingest_document(
     if background_tasks is not None:
         background_tasks.add_task(
             _process_document_background,
+            query_service=service,
             document_id=document_id,
             file_content=file_content,
             filename=file.filename or "unknown",
             document_type=document_type,
+            normalized_document_type=normalized_document_type,
             patient_id=patient_id,
             metadata=metadata_payload,
         )
-
-    logger.info(
-        "Document ingestion queued",
-        extra={
+        return {
             "document_id": document_id,
-            "filename": file.filename,
-            "document_type": document_type,
-            "patient_id": patient_id,
-            "metadata_keys": sorted((metadata_payload or {}).keys()),
-            "size_bytes": len(file_content),
-        },
+            "status": "pending",
+            "message": "Document accepted for processing.",
+        }
+
+    await _process_document_background(
+        query_service=service,
+        document_id=document_id,
+        file_content=file_content,
+        filename=file.filename or "unknown",
+        document_type=document_type,
+        normalized_document_type=normalized_document_type,
+        patient_id=patient_id,
+        metadata=metadata_payload,
     )
 
+    final_status = _ingestion_status[document_id]
     return {
         "document_id": document_id,
-        "status": "pending",
-        "message": "Document accepted for processing.",
+        "status": final_status["status"],
+        "message": final_status.get("message", "Document processing finished."),
     }
 
 
 async def _process_document_background(
+    query_service: ClinicalQueryService,
     document_id: str,
     file_content: bytes,
     filename: str,
     document_type: str,
+    normalized_document_type: str,
     patient_id: str | None,
     metadata: dict[str, object] | None,
 ) -> None:
@@ -881,16 +797,36 @@ async def _process_document_background(
         _ingestion_status[document_id]["progress"] = 10
         _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        # Simulate processing stages. In production, this would call:
-        # 1. Azure Document Intelligence for text extraction
-        # 2. Text chunking pipeline
-        # 3. Embedding generation via Azure OpenAI
-        # 4. Indexing via Azure AI Search
-        await asyncio.sleep(0.1)  # placeholder for actual processing
+        ingestion_service = query_service.ingestion_service
 
-        _ingestion_status[document_id]["status"] = "completed"
+        if document_type == "protocol":
+            metadata_dict = metadata or {}
+            specialty = str(metadata_dict.get("specialty", "general"))
+            guideline_name = str(metadata_dict.get("guideline_name") or metadata_dict.get("guideline") or filename)
+            version = str(metadata_dict.get("version", "1.0"))
+
+            result = await ingestion_service.ingest_protocol(
+                file_bytes=file_content,
+                specialty=specialty,
+                guideline_name=guideline_name,
+                version=version,
+                metadata=metadata,
+            )
+        else:
+            result = await ingestion_service.ingest_patient_document(
+                file_bytes=file_content,
+                document_type=normalized_document_type,
+                patient_id=patient_id,
+                metadata=metadata,
+            )
+
+        result_status = str(result.get("status", "completed"))
+        _ingestion_status[document_id]["status"] = result_status
         _ingestion_status[document_id]["progress"] = 100
+        _ingestion_status[document_id]["pipeline_document_id"] = result.get("document_id")
+        _ingestion_status[document_id]["message"] = str(result.get("message", "Document processing completed."))
         _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _ingestion_status[document_id]["details"] = result
 
         logger.info(
             "Document processing completed",
@@ -899,6 +835,7 @@ async def _process_document_background(
                 "filename": filename,
                 "document_type": document_type,
                 "metadata_keys": sorted((metadata or {}).keys()),
+                "pipeline_document_id": result.get("document_id"),
             },
         )
 

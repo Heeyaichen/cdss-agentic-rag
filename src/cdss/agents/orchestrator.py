@@ -25,7 +25,6 @@ from cdss.core.config import Settings, get_settings
 from cdss.core.exceptions import (
     AgentError,
     AgentTimeoutError,
-    AzureServiceError,
     CDSSError,
 )
 from cdss.core.logging import get_logger, trace_id_var
@@ -176,6 +175,25 @@ class OrchestratorAgent:
 
         logger.info("OrchestratorAgent initialized")
 
+    async def _invoke_agent(self, agent: object, task: AgentTask) -> object:
+        """Invoke an agent using the canonical ``execute`` contract.
+
+        Falls back to legacy ``process`` for backward compatibility with
+        older agent implementations.
+        """
+        execute_method = getattr(agent, "execute", None)
+        if callable(execute_method):
+            return await execute_method(task)
+
+        process_method = getattr(agent, "process", None)
+        if callable(process_method):
+            return await process_method(task)
+
+        raise AgentError(
+            message="Agent does not expose an execute/process method.",
+            agent_name=task.to_agent,
+        )
+
     # ------------------------------------------------------------------
     # Lazy initialization helpers
     # ------------------------------------------------------------------
@@ -200,8 +218,7 @@ class OrchestratorAgent:
                 self.cosmos_client = CosmosDBClient(self.settings)
             except Exception:
                 logger.warning(
-                    "CosmosDBClient initialization failed; "
-                    "conversation history and audit logging will be unavailable"
+                    "CosmosDBClient initialization failed; conversation history and audit logging will be unavailable"
                 )
                 self.cosmos_client = None
 
@@ -399,9 +416,7 @@ class OrchestratorAgent:
             )
             plan_data = {
                 "query_type": query_type,
-                "required_agents": classification.get(
-                    "required_agents", ["literature"]
-                ),
+                "required_agents": classification.get("required_agents", ["literature"]),
                 "sub_queries": {"literature": query.text},
                 "priority": "medium",
                 "parallel_dispatch": True,
@@ -415,9 +430,7 @@ class OrchestratorAgent:
 
         # Normalize required_agents
         valid_agents = {"patient_history", "literature", "protocol", "drug_safety"}
-        required_agents = [
-            a for a in plan_data.get("required_agents", []) if a in valid_agents
-        ]
+        required_agents = [a for a in plan_data.get("required_agents", []) if a in valid_agents]
 
         # Ensure patient_history is included when a patient_id is present
         if query.patient_id and "patient_history" not in required_agents:
@@ -455,9 +468,7 @@ class OrchestratorAgent:
     # Step 2 -- Parallel Agent Dispatch
     # ==================================================================
 
-    async def _dispatch_agents(
-        self, plan: QueryPlan, query: ClinicalQuery
-    ) -> dict[str, AgentOutput]:
+    async def _dispatch_agents(self, plan: QueryPlan, query: ClinicalQuery) -> dict[str, AgentOutput]:
         """Dispatch tasks to required agents in parallel.
 
         Creates an ``AgentTask`` for each agent listed in the plan and
@@ -492,22 +503,16 @@ class OrchestratorAgent:
                 task_payload["patient_id"] = query.patient_id
 
             elif agent_name == "literature":
-                task_payload["entities"] = [
-                    e.value for e in (query.extracted_entities or [])
-                ]
+                task_payload["entities"] = [e.value for e in (query.extracted_entities or [])]
 
             elif agent_name == "protocol":
                 task_payload["conditions"] = [
-                    e.value
-                    for e in (query.extracted_entities or [])
-                    if e.entity_type == "condition"
+                    e.value for e in (query.extracted_entities or []) if e.entity_type == "condition"
                 ]
 
             elif agent_name == "drug_safety":
                 task_payload["medications"] = [
-                    e.value
-                    for e in (query.extracted_entities or [])
-                    if e.entity_type == "medication"
+                    e.value for e in (query.extracted_entities or []) if e.entity_type == "medication"
                 ]
 
             agent_task = AgentTask(
@@ -525,11 +530,9 @@ class OrchestratorAgent:
         # Await all agent tasks concurrently
         results: dict[str, AgentOutput] = {}
         if tasks:
-            done_values = await asyncio.gather(
-                *tasks.values(), return_exceptions=True
-            )
+            done_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-            for agent_name_key, value in zip(tasks.keys(), done_values):
+            for agent_name_key, value in zip(tasks.keys(), done_values, strict=False):
                 if isinstance(value, AgentOutput):
                     results[agent_name_key] = value
                 elif isinstance(value, Exception):
@@ -550,9 +553,7 @@ class OrchestratorAgent:
 
         return results
 
-    async def _execute_agent(
-        self, agent_name: str, task: AgentTask, timeout: int
-    ) -> AgentOutput:
+    async def _execute_agent(self, agent_name: str, task: AgentTask, timeout: int) -> AgentOutput:
         """Execute a single agent with a timeout guard.
 
         Args:
@@ -586,16 +587,13 @@ class OrchestratorAgent:
                 agent_name=agent_name,
                 latency_ms=0,
                 sources_retrieved=0,
-                summary=(
-                    f"Agent '{agent_name}' is not configured. "
-                    "No data was retrieved for this component."
-                ),
+                summary=(f"Agent '{agent_name}' is not configured. No data was retrieved for this component."),
                 raw_data=None,
             )
 
         try:
             result = await asyncio.wait_for(
-                agent.process(task),
+                self._invoke_agent(agent, task),
                 timeout=timeout,
             )
 
@@ -608,7 +606,7 @@ class OrchestratorAgent:
                     latency_ms=latency_ms,
                     sources_retrieved=result.get("sources_retrieved", 0),
                     summary=result.get("summary", ""),
-                    raw_data=result.get("raw_data"),
+                    raw_data=result,
                 )
 
             # If already an AgentOutput, update latency
@@ -625,7 +623,7 @@ class OrchestratorAgent:
                 raw_data=None,
             )
 
-        except asyncio.TimeoutError:
+        except TimeoutError as exc:
             latency_ms = int((time.monotonic() - start_ms) * 1000)
             logger.error(
                 "Agent timed out",
@@ -635,7 +633,7 @@ class OrchestratorAgent:
                 message=f"Agent '{agent_name}' timed out after {timeout}s",
                 agent_name=agent_name,
                 timeout_seconds=float(timeout),
-            )
+            ) from exc
 
         except AgentTimeoutError:
             raise
@@ -696,9 +694,7 @@ class OrchestratorAgent:
         if self.fusion is not None:
             try:
                 fused_context = self.fusion.build_context_prompt(agent_outputs)
-                context_sections.append(
-                    f"--- CROSS-SOURCE FUSION ---\n{fused_context}\n"
-                )
+                context_sections.append(f"--- CROSS-SOURCE FUSION ---\n{fused_context}\n")
             except Exception as exc:
                 logger.warning(
                     "Cross-source fusion failed, proceeding without it",
@@ -789,7 +785,10 @@ class OrchestratorAgent:
         drug_alerts: list[DrugAlert] = []
         drug_safety_output = agent_outputs.get("drug_safety")
         if drug_safety_output and drug_safety_output.raw_data:
-            raw_alerts = drug_safety_output.raw_data.get("alerts", [])
+            raw_alerts = drug_safety_output.raw_data.get(
+                "drug_alerts",
+                drug_safety_output.raw_data.get("alerts", []),
+            )
             for alert_data in raw_alerts:
                 try:
                     severity = alert_data.get("severity", "moderate")
@@ -814,17 +813,11 @@ class OrchestratorAgent:
                     )
 
         # Clamp confidence score
-        confidence = max(
-            0.0, min(1.0, float(response_data.get("confidence_score", 0.5)))
-        )
+        confidence = max(0.0, min(1.0, float(response_data.get("confidence_score", 0.5))))
 
         return ClinicalResponse(
-            assessment=response_data.get(
-                "assessment", "Assessment could not be generated."
-            ),
-            recommendation=response_data.get(
-                "recommendation", "No recommendation available."
-            ),
+            assessment=response_data.get("assessment", "Assessment could not be generated."),
+            recommendation=response_data.get("recommendation", "No recommendation available."),
             evidence_summary=response_data.get("evidence_summary", []),
             drug_alerts=drug_alerts,
             confidence_score=confidence,
@@ -865,24 +858,23 @@ class OrchestratorAgent:
                     message_type="task_request",
                     payload={
                         "response": response.model_dump(mode="json"),
-                        "agent_outputs": {
-                            name: out.model_dump(mode="json")
-                            for name, out in agent_outputs.items()
-                        },
+                        "agent_outputs": {name: out.model_dump(mode="json") for name, out in agent_outputs.items()},
                     },
                     session_id=str(uuid4()),
                     trace_id=trace_id_var.get(str(uuid4())),
                 )
 
                 validation_result = await asyncio.wait_for(
-                    self.guardrails_agent.process(guardrails_task),
+                    self._invoke_agent(self.guardrails_agent, guardrails_task),
                     timeout=AGENT_TIMEOUT_SECONDS,
                 )
 
-                if isinstance(validation_result, dict):
-                    guardrails = GuardrailsResult(**validation_result)
-                elif isinstance(validation_result, GuardrailsResult):
+                if isinstance(validation_result, GuardrailsResult):
                     guardrails = validation_result
+                elif isinstance(validation_result, AgentOutput):
+                    guardrails = self._parse_guardrails_payload(validation_result.raw_data)
+                elif isinstance(validation_result, dict):
+                    guardrails = self._parse_guardrails_payload(validation_result)
                 else:
                     guardrails = GuardrailsResult(is_valid=True)
             else:
@@ -896,8 +888,7 @@ class OrchestratorAgent:
             guardrails = GuardrailsResult(
                 is_valid=True,
                 disclaimers=[
-                    "Guardrails validation could not be completed. "
-                    "Exercise additional caution with this response."
+                    "Guardrails validation could not be completed. Exercise additional caution with this response."
                 ],
             )
 
@@ -938,6 +929,28 @@ class OrchestratorAgent:
 
         return response
 
+    def _parse_guardrails_payload(
+        self,
+        payload: dict | None,
+    ) -> GuardrailsResult:
+        """Normalize guardrails payloads into a ``GuardrailsResult`` model."""
+        if not isinstance(payload, dict):
+            return GuardrailsResult(is_valid=True)
+
+        candidate = payload.get("guardrails_result", payload)
+        if not isinstance(candidate, dict):
+            return GuardrailsResult(is_valid=True)
+
+        try:
+            return GuardrailsResult(
+                is_valid=bool(candidate.get("is_valid", True)),
+                hallucination_flags=list(candidate.get("hallucination_flags", [])),
+                safety_concerns=list(candidate.get("safety_concerns", [])),
+                disclaimers=list(candidate.get("disclaimers", [])),
+            )
+        except (TypeError, ValueError):
+            return GuardrailsResult(is_valid=True)
+
     async def _validate_with_llm(
         self,
         response: ClinicalResponse,
@@ -952,9 +965,7 @@ class OrchestratorAgent:
         Returns:
             A ``GuardrailsResult`` from the LLM validation.
         """
-        agent_context = "\n".join(
-            f"[{name}]: {out.summary}" for name, out in agent_outputs.items()
-        )
+        agent_context = "\n".join(f"[{name}]: {out.summary}" for name, out in agent_outputs.items())
 
         messages = [
             {"role": "system", "content": GUARDRAILS_SYSTEM_PROMPT},
@@ -999,9 +1010,7 @@ class OrchestratorAgent:
     # Conflict Resolution
     # ==================================================================
 
-    async def _resolve_conflicts(
-        self, agent_outputs: dict[str, AgentOutput]
-    ) -> list[str]:
+    async def _resolve_conflicts(self, agent_outputs: dict[str, AgentOutput]) -> list[str]:
         """Resolve conflicts between agent outputs.
 
         Conflict resolution rules (from architecture):
@@ -1060,10 +1069,7 @@ class OrchestratorAgent:
 
         # Rule 4: Explicit uncertainty detection
         low_confidence_agents = [
-            name
-            for name, output in agent_outputs.items()
-            if output.sources_retrieved == 0
-            and output.raw_data is None
+            name for name, output in agent_outputs.items() if output.sources_retrieved == 0 and output.raw_data is None
         ]
         if low_confidence_agents:
             agent_list = ", ".join(low_confidence_agents)
@@ -1084,9 +1090,8 @@ class OrchestratorAgent:
                 ("safe", "unsafe"),
             ]
             for positive, negative in contradiction_markers:
-                if (
-                    (positive in protocol_summary and negative in literature_summary)
-                    or (negative in protocol_summary and positive in literature_summary)
+                if (positive in protocol_summary and negative in literature_summary) or (
+                    negative in protocol_summary and positive in literature_summary
                 ):
                     notes.append(
                         "Potential contradiction detected between protocol guidelines "
@@ -1132,9 +1137,7 @@ class OrchestratorAgent:
         # Save conversation turn
         try:
             # Determine turn number by querying existing history
-            existing_turns = await self.cosmos_client.get_conversation_history(
-                session_id=session_id, limit=1
-            )
+            existing_turns = await self.cosmos_client.get_conversation_history(session_id=session_id, limit=1)
             turn_number = len(existing_turns) + 1
 
             # Build guardrails result for the turn
@@ -1142,9 +1145,7 @@ class OrchestratorAgent:
                 is_valid=True,
                 hallucination_flags=[],
                 safety_concerns=[
-                    d.replace("SAFETY CONCERN: ", "")
-                    for d in response.disclaimers
-                    if d.startswith("SAFETY CONCERN:")
+                    d.replace("SAFETY CONCERN: ", "") for d in response.disclaimers if d.startswith("SAFETY CONCERN:")
                 ],
                 disclaimers=response.disclaimers,
             )
@@ -1156,17 +1157,13 @@ class OrchestratorAgent:
                 timestamp=now,
                 clinician_id=clinician_id,
                 query=query,
-                agent_outputs={
-                    name: out for name, out in agent_outputs.items()
-                },
+                agent_outputs={name: out for name, out in agent_outputs.items()},
                 response=response,
                 guardrails=guardrails_result,
                 total_latency_ms=total_latency_ms,
             )
 
-            await self.cosmos_client.save_conversation_turn(
-                turn.model_dump(mode="json")
-            )
+            await self.cosmos_client.save_conversation_turn(turn.model_dump(mode="json"))
             logger.debug(
                 "Conversation turn saved",
                 extra={
@@ -1200,17 +1197,11 @@ class OrchestratorAgent:
                 justification=f"Clinical query: {query.text[:200]}",
                 outcome="success",
                 data_sent_to_llm=True,
-                phi_fields_sent=(
-                    ["patient_id", "conditions", "medications", "allergies"]
-                    if query.patient_id
-                    else []
-                ),
+                phi_fields_sent=(["patient_id", "conditions", "medications", "allergies"] if query.patient_id else []),
                 phi_fields_redacted=["demographics.name", "demographics.ssn"],
             )
 
-            await self.cosmos_client.log_audit_event(
-                audit_entry.model_dump(mode="json")
-            )
+            await self.cosmos_client.log_audit_event(audit_entry.model_dump(mode="json"))
             logger.debug("Audit log entry saved", extra={"session_id": session_id})
 
         except Exception as exc:

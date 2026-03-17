@@ -330,27 +330,33 @@ az login
 # # Deploy to production environment
 # ./infra/scripts/deploy.sh prod cdss-prod-rg
 
-# 1) Create (or use existing) ACR
+# 0) Bootstrap RG (idempotent)
+RG=cdss-prod-rg
+LOC=eastus2
 ACR_NAME=cdssacr
-az acr create -n "$ACR_NAME" -g cdss-prod-rg -l eastus2 --sku Standard
-
-# 2) Build and push real backend image
 IMAGE_TAG=2026.03.14.1
-az acr login -n "$ACR_NAME"
 
+az group create -n "$RG" -l "$LOC"
+
+# 1) Create (or use existing) ACR
+az acr show -n "$ACR_NAME" -g "$RG" >/dev/null 2>&1 || \
+az acr create -n "$ACR_NAME" -g "$RG" -l "$LOC" --sku Standard
+
+# 2) Build/push backend image (linux/amd64 required for Container Apps)
+az acr login -n "$ACR_NAME"
 docker buildx create --name cdssbuilder --use 2>/dev/null || docker buildx use cdssbuilder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64 \
   -t "$ACR_NAME.azurecr.io/cdss-api:$IMAGE_TAG" \
   --push .
 
-# 2) Verify tag exists in ACR
+# 2) Verify image tag exists
 az acr repository show --name "$ACR_NAME" --image "cdss-api:$IMAGE_TAG" -o table
 
 # 3) Deploy infra+app using real image + MI pull
 CONTAINER_IMAGE="$ACR_NAME.azurecr.io/cdss-api:$IMAGE_TAG" \
 ACR_NAME="$ACR_NAME" \
-./infra/scripts/deploy.sh prod cdss-prod-rg eastus2 true
+./infra/scripts/deploy.sh prod "$RG" "$LOC" true
 
 # Optional: expose prod API publicly (for public Static Web App/browser access)
 # ./infra/scripts/deploy.sh prod cdss-prod-rg eastus2 true

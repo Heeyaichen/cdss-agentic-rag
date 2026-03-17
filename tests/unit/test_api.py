@@ -1,455 +1,251 @@
-"""Tests for FastAPI endpoints.
+"""Runtime-path tests for FastAPI routes.
 
-Uses TestClient with dependency injection overrides to mock all backend
-services. Tests cover query submission, patient lookup, conversation
-history, drug interactions, literature search, health check, audit trail,
-and document ingestion.
+These tests hit the real route handlers and request/response models while
+stubbing only service-layer boundaries.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, Field
-
-from cdss.core.models import ClinicalQuery, ClinicalResponse, DrugAlert, Citation
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Minimal FastAPI App for Testing
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# We build a test app that mirrors the expected API surface.
-# This avoids importing the actual app module (which may have side effects)
-# while still testing the endpoint behavior thoroughly.
-
-
-class QueryRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-    patient_id: str | None = None
-    session_id: str | None = None
-
-
-class FeedbackRequest(BaseModel):
-    rating: int
-    comment: str | None = None
-
-
-class DrugInteractionRequest(BaseModel):
-    drugs: list[str]
-
-
-class LiteratureSearchRequest(BaseModel):
-    query: str
-    max_results: int = 20
-
-
-class ProtocolSearchRequest(BaseModel):
-    query: str
-    specialty: str | None = None
-
-
-class DocumentIngestRequest(BaseModel):
-    document_type: str
-    content: str
-    metadata: dict | None = None
-
-
-# Mock services
-_mock_orchestrator = AsyncMock()
-_mock_cosmos = AsyncMock()
-_mock_pubmed = AsyncMock()
-_mock_search = AsyncMock()
-_mock_drug_safety = AsyncMock()
-_mock_ingestion = AsyncMock()
-
-
-def _create_test_app() -> FastAPI:
-    app = FastAPI(title="CDSS API - Test")
-
-    @app.post("/api/v1/query")
-    async def submit_query(request: QueryRequest):
-        query = ClinicalQuery(
-            text=request.text,
-            patient_id=request.patient_id,
-            session_id=request.session_id,
-        )
-        response = await _mock_orchestrator.process_query(query)
-        return response
-
-    @app.get("/api/v1/patients/{patient_id}")
-    async def get_patient(patient_id: str):
-        profile = await _mock_cosmos.get_patient_profile(patient_id)
-        if profile is None:
-            raise HTTPException(status_code=404, detail="Patient not found")
-        return profile
-
-    @app.get("/api/v1/conversations/{session_id}")
-    async def get_conversation(session_id: str):
-        history = await _mock_cosmos.get_conversation_history(session_id)
-        return {"session_id": session_id, "turns": history}
-
-    @app.post("/api/v1/conversations/{session_id}/feedback")
-    async def submit_feedback(session_id: str, request: FeedbackRequest):
-        await _mock_cosmos.save_conversation_turn({
-            "session_id": session_id,
-            "type": "feedback",
-            "rating": request.rating,
-            "comment": request.comment,
-        })
-        return {"status": "ok", "session_id": session_id}
-
-    @app.post("/api/v1/drugs/interactions")
-    async def check_drug_interactions(request: DrugInteractionRequest):
-        result = await _mock_drug_safety.check_interactions(request.drugs)
-        return {"drugs": request.drugs, "interactions": result}
-
-    @app.post("/api/v1/search/literature")
-    async def search_literature(request: LiteratureSearchRequest):
-        articles = await _mock_pubmed.search_and_fetch(request.query, request.max_results)
-        return {"query": request.query, "articles": articles}
-
-    @app.post("/api/v1/search/protocols")
-    async def search_protocols(request: ProtocolSearchRequest):
-        results = await _mock_search.search_treatment_protocols(
-            query=request.query, specialty=request.specialty
-        )
-        return {"query": request.query, "results": results}
-
-    @app.get("/api/v1/health")
-    async def health_check():
-        return {"status": "healthy", "version": "0.1.0"}
-
-    @app.get("/api/v1/audit")
-    async def get_audit_trail(patient_id: str | None = None, limit: int = 100):
-        events = await _mock_cosmos.get_audit_trail(patient_id=patient_id, limit=limit)
-        return {"events": events, "count": len(events)}
-
-    @app.post("/api/v1/documents/ingest")
-    async def ingest_document(request: DocumentIngestRequest):
-        result = await _mock_ingestion.ingest_document(
-            content=request.content,
-            document_type=request.document_type,
-            metadata=request.metadata,
-        )
-        return result
-
-    return app
-
-
-@pytest.fixture(autouse=True)
-def reset_mocks():
-    """Reset all mocks before each test."""
-    _mock_orchestrator.reset_mock()
-    _mock_cosmos.reset_mock()
-    _mock_pubmed.reset_mock()
-    _mock_search.reset_mock()
-    _mock_drug_safety.reset_mock()
-    _mock_ingestion.reset_mock()
-
-
-@pytest.fixture
-def client() -> TestClient:
-    """Return a FastAPI TestClient."""
-    app = _create_test_app()
-    return TestClient(app)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /api/v1/query
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestQueryEndpoint:
-    """Tests for the clinical query submission endpoint."""
-
-    def test_valid_query_returns_response(self, client):
-        _mock_orchestrator.process_query.return_value = ClinicalResponse(
-            assessment="Patient has uncontrolled T2DM.",
-            recommendation="Consider SGLT2 inhibitor.",
-            confidence_score=0.87,
-            evidence_summary=["DAPA-CKD trial supports this."],
-            disclaimers=["This is a decision support tool."],
-        )
-
-        response = client.post("/api/v1/query", json={
-            "text": "Treatment for T2DM with CKD?",
-            "patient_id": "P-12345",
-            "session_id": "sess-001",
-        })
-
-        assert response.status_code == 200
-        data = response.json()
-        assert "assessment" in data
-        assert "recommendation" in data
-        assert data["confidence_score"] == 0.87
-
-    def test_missing_text_field_returns_422(self, client):
-        response = client.post("/api/v1/query", json={
-            "patient_id": "P-12345",
-        })
-        assert response.status_code == 422
-
-    def test_empty_text_field_returns_422(self, client):
-        response = client.post("/api/v1/query", json={
-            "text": "",
-        })
-        # ClinicalQuery requires min_length=1
-        assert response.status_code == 422
-
-    def test_query_without_patient_id(self, client):
-        _mock_orchestrator.process_query.return_value = ClinicalResponse(
-            assessment="General assessment.",
-            recommendation="General recommendation.",
-            confidence_score=0.75,
-        )
-
-        response = client.post("/api/v1/query", json={
-            "text": "What is the mechanism of metformin?",
-        })
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["confidence_score"] == 0.75
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GET /api/v1/patients/{patient_id}
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestPatientEndpoint:
-    """Tests for the patient profile endpoint."""
-
-    def test_get_existing_patient(self, client, sample_patient_profile):
-        _mock_cosmos.get_patient_profile.return_value = sample_patient_profile
-
-        response = client.get("/api/v1/patients/P-12345")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["patient_id"] == "P-12345"
-        assert len(data["active_conditions"]) == 2
-
-    def test_get_nonexistent_patient_returns_404(self, client):
-        _mock_cosmos.get_patient_profile.return_value = None
-
-        response = client.get("/api/v1/patients/P-NONEXISTENT")
-
-        assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GET /api/v1/conversations/{session_id}
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestConversationEndpoint:
-    """Tests for the conversation history endpoint."""
-
-    def test_get_conversation_history(self, client):
-        _mock_cosmos.get_conversation_history.return_value = [
-            {"id": "turn-1", "query": "What about diabetes?", "response": "Consider SGLT2i."},
-            {"id": "turn-2", "query": "Any interactions?", "response": "Minor with metformin."},
-        ]
-
-        response = client.get("/api/v1/conversations/sess-001")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["session_id"] == "sess-001"
-        assert len(data["turns"]) == 2
-
-    def test_get_empty_conversation(self, client):
-        _mock_cosmos.get_conversation_history.return_value = []
-
-        response = client.get("/api/v1/conversations/sess-empty")
-
-        assert response.status_code == 200
-        assert len(response.json()["turns"]) == 0
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /api/v1/conversations/{id}/feedback
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestFeedbackEndpoint:
-    """Tests for the feedback submission endpoint."""
-
-    def test_submit_feedback(self, client):
-        _mock_cosmos.save_conversation_turn.return_value = {"id": "fb-001"}
-
-        response = client.post("/api/v1/conversations/sess-001/feedback", json={
-            "rating": 5,
-            "comment": "Excellent recommendation, very helpful.",
-        })
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "ok"
-        _mock_cosmos.save_conversation_turn.assert_called_once()
-
-    def test_submit_feedback_minimal(self, client):
-        _mock_cosmos.save_conversation_turn.return_value = {"id": "fb-002"}
-
-        response = client.post("/api/v1/conversations/sess-002/feedback", json={
-            "rating": 3,
-        })
-
-        assert response.status_code == 200
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /api/v1/drugs/interactions
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestDrugInteractionsEndpoint:
-    """Tests for the drug interactions endpoint."""
-
-    def test_check_interactions(self, client):
-        _mock_drug_safety.check_interactions.return_value = [
+import pytest
+
+from cdss.api.routes import _ingestion_status, router, set_query_service
+from cdss.core.models import ClinicalResponse
+
+
+class _StubIngestionService:
+    def __init__(self) -> None:
+        self.patient_ingest_calls: list[dict] = []
+        self.protocol_ingest_calls: list[dict] = []
+
+    async def ingest_patient_document(
+        self,
+        file_bytes: bytes,
+        document_type: str,
+        patient_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        self.patient_ingest_calls.append(
             {
-                "drug_a": "metformin",
-                "drug_b": "lisinopril",
-                "severity": "minor",
-                "description": "Minor interaction.",
+                "bytes": len(file_bytes),
+                "document_type": document_type,
+                "patient_id": patient_id,
+                "metadata": metadata or {},
+            }
+        )
+        return {
+            "document_id": "pipeline-patient-doc-1",
+            "status": "completed",
+            "message": "Patient document ingested.",
+        }
+
+    async def ingest_protocol(
+        self,
+        file_bytes: bytes,
+        specialty: str,
+        guideline_name: str,
+        version: str,
+        metadata: dict | None = None,
+    ) -> dict:
+        self.protocol_ingest_calls.append(
+            {
+                "bytes": len(file_bytes),
+                "specialty": specialty,
+                "guideline_name": guideline_name,
+                "version": version,
+                "metadata": metadata or {},
+            }
+        )
+        return {
+            "document_id": "pipeline-protocol-doc-1",
+            "status": "completed",
+            "message": "Protocol ingested.",
+        }
+
+
+class _StubCosmosClient:
+    async def get_audit_trail(
+        self,
+        patient_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        return [
+            {
+                "id": "audit-1",
+                "patient_id": patient_id,
+                "action": "query_processed",
+                "limit": limit,
+                "date_from": date_from,
+                "date_to": date_to,
             }
         ]
 
-        response = client.post("/api/v1/drugs/interactions", json={
-            "drugs": ["metformin", "lisinopril"],
-        })
 
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["interactions"]) == 1
-        assert data["drugs"] == ["metformin", "lisinopril"]
+class _StubQueryService:
+    def __init__(self) -> None:
+        self.ingestion_service = _StubIngestionService()
+        self.cosmos_client = _StubCosmosClient()
+        self.last_query_payload: dict | None = None
+        self.last_search_payload: dict | None = None
 
+    async def process_query(
+        self,
+        query_text: str,
+        patient_id: str | None = None,
+        session_id: str | None = None,
+        clinician_id: str = "system",
+    ) -> ClinicalResponse:
+        self.last_query_payload = {
+            "query_text": query_text,
+            "patient_id": patient_id,
+            "session_id": session_id,
+            "clinician_id": clinician_id,
+        }
+        return ClinicalResponse(
+            assessment="Assessment from stub service.",
+            recommendation="Recommendation from stub service.",
+            confidence_score=0.81,
+        )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /api/v1/search/literature
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestLiteratureSearchEndpoint:
-    """Tests for the literature search endpoint."""
-
-    def test_search_pubmed(self, client):
-        _mock_pubmed.search_and_fetch.return_value = [
-            {"pmid": "32970396", "title": "DAPA-CKD Trial"},
-        ]
-
-        response = client.post("/api/v1/search/literature", json={
-            "query": "SGLT2 inhibitors for CKD",
-            "max_results": 10,
-        })
-
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["articles"]) == 1
-        assert data["articles"][0]["pmid"] == "32970396"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /api/v1/search/protocols
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestProtocolSearchEndpoint:
-    """Tests for the protocol search endpoint."""
-
-    def test_search_protocols(self, client):
-        _mock_search.search_treatment_protocols.return_value = [
-            {"id": "proto-1", "content": "ADA 2024 guideline", "score": 0.9},
-        ]
-
-        response = client.post("/api/v1/search/protocols", json={
-            "query": "diabetes with CKD guidelines",
-            "specialty": "endocrinology",
-        })
-
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["results"]) == 1
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GET /api/v1/health
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestHealthEndpoint:
-    """Tests for the health check endpoint."""
-
-    def test_health_returns_healthy(self, client):
-        response = client.get("/api/v1/health")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert "version" in data
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GET /api/v1/audit
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestAuditEndpoint:
-    """Tests for the audit trail endpoint."""
-
-    def test_get_audit_trail(self, client):
-        _mock_cosmos.get_audit_trail.return_value = [
-            {"id": "audit-1", "type": "patient_data_access", "action": "read_patient"},
-            {"id": "audit-2", "type": "llm_interaction", "action": "generate_response"},
-        ]
-
-        response = client.get("/api/v1/audit")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["count"] == 2
-        assert len(data["events"]) == 2
-
-    def test_get_audit_trail_with_patient_filter(self, client):
-        _mock_cosmos.get_audit_trail.return_value = [
-            {"id": "audit-1", "type": "patient_data_access", "patient_id": "P-12345"},
-        ]
-
-        response = client.get("/api/v1/audit?patient_id=P-12345")
-
-        assert response.status_code == 200
-        _mock_cosmos.get_audit_trail.assert_called_once_with(patient_id="P-12345", limit=100)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /api/v1/documents/ingest
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestDocumentIngestEndpoint:
-    """Tests for the document ingestion endpoint."""
-
-    def test_ingest_document(self, client):
-        _mock_ingestion.ingest_document.return_value = {
-            "status": "completed",
-            "document_id": "doc-001",
-            "chunks_created": 5,
+    async def search_patients(
+        self,
+        search: str | None = None,
+        page: int = 1,
+        limit: int = 100,
+    ) -> dict:
+        self.last_search_payload = {
+            "search": search,
+            "page": page,
+            "limit": limit,
+        }
+        return {
+            "patients": [
+                {
+                    "id": "patient-1",
+                    "patient_id": "P-12345",
+                    "doc_type": "patient_profile",
+                }
+            ],
+            "page": page,
+            "page_size": limit,
+            "limit": limit,
+            "total": 1,
         }
 
-        response = client.post("/api/v1/documents/ingest", json={
-            "document_type": "lab_report",
-            "content": "CBC: WBC 7.5, RBC 4.8, Hemoglobin 14.2",
-            "metadata": {"patient_id": "P-12345"},
-        })
+    async def get_patient_profile(self, patient_id: str) -> dict | None:
+        return {
+            "id": patient_id,
+            "patient_id": patient_id,
+            "doc_type": "patient_profile",
+        }
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "completed"
-        assert data["chunks_created"] == 5
+    async def update_patient_profile(self, patient_id: str, profile_data: dict) -> dict:
+        output = dict(profile_data)
+        output["patient_id"] = patient_id
+        return output
+
+    async def get_conversation_history(self, session_id: str, limit: int = 20) -> list[dict]:
+        return [{"session_id": session_id, "id": "turn-1"}]
+
+    async def submit_feedback(
+        self,
+        conversation_id: str,
+        rating: int,
+        correction: str | None = None,
+    ) -> dict:
+        return {
+            "conversation_id": conversation_id,
+            "rating": rating,
+            "correction": correction,
+            "status": "saved",
+        }
+
+
+@pytest.fixture
+def stub_service() -> _StubQueryService:
+    return _StubQueryService()
+
+
+@pytest.fixture
+def client(stub_service: _StubQueryService) -> TestClient:
+    _ingestion_status.clear()
+    set_query_service(stub_service)
+
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+def test_submit_query_uses_real_route_and_schema(client: TestClient, stub_service: _StubQueryService) -> None:
+    response = client.post(
+        "/api/v1/query",
+        json={
+            "text": "What is the mechanism of metformin?",
+            "patient_id": "P-12345",
+            "session_id": "sess-api-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["confidence_score"] == 0.81
+    assert stub_service.last_query_payload == {
+        "query_text": "What is the mechanism of metformin?",
+        "patient_id": "P-12345",
+        "session_id": "sess-api-1",
+        "clinician_id": "system",
+    }
+
+
+def test_search_patients_calls_service_layer(client: TestClient, stub_service: _StubQueryService) -> None:
+    response = client.get("/api/v1/patients?search=diabetes&page=2&limit=5")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["patients"][0]["patient_id"] == "P-12345"
+    assert stub_service.last_search_payload == {
+        "search": "diabetes",
+        "page": 2,
+        "limit": 5,
+    }
+
+
+def test_document_ingestion_uses_service_instead_of_placeholder(
+    client: TestClient, stub_service: _StubQueryService
+) -> None:
+    response = client.post(
+        "/api/v1/documents/ingest?document_type=patient_record&patient_id=P-12345",
+        files={"file": ("patient-note.txt", b"Patient has T2DM and CKD.", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    ingest = response.json()
+    assert ingest["status"] == "pending"
+
+    status_response = client.get(f"/api/v1/documents/{ingest['document_id']}/status")
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["status"] == "completed"
+    assert stub_service.ingestion_service.patient_ingest_calls
+
+
+def test_health_endpoint_real_route(client: TestClient) -> None:
+    response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["service"] == "cdss-agentic-rag"
+
+
+def test_audit_endpoint_uses_cosmos_client(client: TestClient) -> None:
+    response = client.get("/api/v1/audit?patient_id=P-12345&limit=10")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["patient_id"] == "P-12345"
+    assert data[0]["limit"] == 10

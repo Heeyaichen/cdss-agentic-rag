@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from uuid import uuid4
 
 from cdss.core.exceptions import AgentError
 from cdss.core.logging import get_logger
@@ -119,6 +118,10 @@ class BaseAgent(ABC):
                     "error_type": type(exc).__name__,
                 },
             ) from exc
+
+    async def process(self, task: AgentTask) -> AgentOutput:
+        """Compatibility alias for legacy callers that still use ``process``."""
+        return await self.execute(task)
 
     @abstractmethod
     async def _execute(self, task: AgentTask) -> dict:

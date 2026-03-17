@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from azure.core.credentials import TokenCredential
-from azure.cosmos import CosmosClient, PartitionKey, exceptions as cosmos_exceptions
+from azure.cosmos import CosmosClient, exceptions as cosmos_exceptions
 from azure.identity import DefaultAzureCredential
 
 from cdss.core.config import Settings, get_settings
@@ -52,9 +52,7 @@ class CosmosDBClient:
                 url=self._settings.cosmos_db_endpoint,
                 credential=credential,
             )
-            self._database = self._client.get_database_client(
-                self._settings.cosmos_db_database_name
-            )
+            self._database = self._client.get_database_client(self._settings.cosmos_db_database_name)
             self._container_name_map: dict[str, str] = {
                 CONTAINER_PATIENT_PROFILES: self._settings.azure_cosmos_patient_profiles_container,
                 CONTAINER_CONVERSATIONS: self._settings.azure_cosmos_conversation_history_container,
@@ -80,9 +78,7 @@ class CosmosDBClient:
 
         except Exception as exc:
             logger.error("Failed to initialize CosmosDBClient", error=str(exc))
-            raise AzureServiceError(
-                f"Failed to initialize Cosmos DB client: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to initialize Cosmos DB client: {exc}") from exc
 
     def _get_container(self, name: str) -> Any:
         """Get a container client by name.
@@ -98,10 +94,7 @@ class CosmosDBClient:
         """
         container = self._containers.get(name)
         if container is None:
-            raise AzureServiceError(
-                f"Unknown container: '{name}'. "
-                f"Valid containers: {list(self._containers.keys())}"
-            )
+            raise AzureServiceError(f"Unknown container: '{name}'. Valid containers: {list(self._containers.keys())}")
         return container
 
     # -------------------------------------------------------------------------
@@ -137,9 +130,7 @@ class CosmosDBClient:
                 patient_id=patient_id,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to retrieve patient profile '{patient_id}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to retrieve patient profile '{patient_id}': {exc}") from exc
 
     async def upsert_patient_profile(self, profile: dict) -> dict:
         """Create or update a patient profile.
@@ -173,13 +164,85 @@ class CosmosDBClient:
                 patient_id=profile.get("patient_id", profile.get("id")),
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to upsert patient profile: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to upsert patient profile: {exc}") from exc
 
-    async def vector_search_patients(
-        self, query_vector: list[float], top: int = 10
+    async def search_patient_profiles(
+        self,
+        search: str | None = None,
+        limit: int = 200,
     ) -> list[dict]:
+        """Search patient profiles with lightweight text filtering.
+
+        Args:
+            search: Optional free-text query (patient ID, condition, medication).
+            limit: Maximum number of documents to read from Cosmos.
+
+        Returns:
+            Matching patient profile dictionaries.
+
+        Raises:
+            AzureServiceError: If the query operation fails.
+        """
+        container = self._get_container(CONTAINER_PATIENT_PROFILES)
+
+        try:
+            query = "SELECT TOP @limit * FROM c"
+            parameters: list[dict[str, Any]] = [
+                {"name": "@limit", "value": limit},
+            ]
+            documents = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+
+            profiles = [dict(doc) for doc in documents]
+            if not search:
+                return profiles
+
+            search_term = search.strip().lower()
+            if not search_term:
+                return profiles
+
+            return [profile for profile in profiles if self._profile_matches_search(profile, search_term)]
+
+        except Exception as exc:
+            logger.error(
+                "Failed to search patient profiles",
+                search=search,
+                error=str(exc),
+            )
+            raise AzureServiceError(f"Failed to search patient profiles: {exc}") from exc
+
+    @staticmethod
+    def _profile_matches_search(profile: dict[str, Any], search_term: str) -> bool:
+        patient_id = str(profile.get("patient_id", "")).lower()
+        if search_term in patient_id:
+            return True
+
+        demographics = profile.get("demographics", {})
+        if isinstance(demographics, dict):
+            name = str(demographics.get("name", "")).lower()
+            if search_term in name:
+                return True
+
+        for condition in profile.get("active_conditions", []):
+            if isinstance(condition, dict):
+                display = str(condition.get("display", "")).lower()
+                if search_term in display:
+                    return True
+
+        for medication in profile.get("active_medications", []):
+            if isinstance(medication, dict):
+                name = str(medication.get("name", "")).lower()
+                if search_term in name:
+                    return True
+
+        return False
+
+    async def vector_search_patients(self, query_vector: list[float], top: int = 10) -> list[dict]:
         """Search patient profiles using vector similarity.
 
         Uses the Cosmos DB for NoSQL vector search capability to find
@@ -232,9 +295,7 @@ class CosmosDBClient:
                 "Vector search on patient profiles failed",
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Vector search on patient profiles failed: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Vector search on patient profiles failed: {exc}") from exc
 
     # -------------------------------------------------------------------------
     # Conversation History
@@ -273,13 +334,9 @@ class CosmosDBClient:
                 session_id=turn.get("session_id"),
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to save conversation turn: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to save conversation turn: {exc}") from exc
 
-    async def get_conversation_history(
-        self, session_id: str, limit: int = 20
-    ) -> list[dict]:
+    async def get_conversation_history(self, session_id: str, limit: int = 20) -> list[dict]:
         """Retrieve conversation history for a session.
 
         Args:
@@ -295,11 +352,7 @@ class CosmosDBClient:
         container = self._get_container(CONTAINER_CONVERSATIONS)
 
         try:
-            query = (
-                "SELECT TOP @limit * FROM c "
-                "WHERE c.session_id = @sessionId "
-                "ORDER BY c.timestamp DESC"
-            )
+            query = "SELECT TOP @limit * FROM c WHERE c.session_id = @sessionId ORDER BY c.timestamp DESC"
 
             parameters: list[dict[str, Any]] = [
                 {"name": "@limit", "value": limit},
@@ -329,17 +382,14 @@ class CosmosDBClient:
                 error=str(exc),
             )
             raise AzureServiceError(
-                f"Failed to retrieve conversation history for session "
-                f"'{session_id}': {exc}"
+                f"Failed to retrieve conversation history for session '{session_id}': {exc}"
             ) from exc
 
     # -------------------------------------------------------------------------
     # Embedding Cache
     # -------------------------------------------------------------------------
 
-    async def get_cached_embedding(
-        self, source_type: str, content_hash: str
-    ) -> list[float] | None:
+    async def get_cached_embedding(self, source_type: str, content_hash: str) -> list[float] | None:
         """Retrieve a cached embedding by source type and content hash.
 
         Args:
@@ -379,13 +429,9 @@ class CosmosDBClient:
                 content_hash=content_hash,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to retrieve cached embedding: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to retrieve cached embedding: {exc}") from exc
 
-    async def cache_embedding(
-        self, source_type: str, content_hash: str, embedding: list[float]
-    ) -> None:
+    async def cache_embedding(self, source_type: str, content_hash: str, embedding: list[float]) -> None:
         """Cache an embedding vector for future retrieval.
 
         Args:
@@ -425,9 +471,7 @@ class CosmosDBClient:
                 content_hash=content_hash,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to cache embedding: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to cache embedding: {exc}") from exc
 
     # -------------------------------------------------------------------------
     # Audit Log
@@ -469,9 +513,7 @@ class CosmosDBClient:
                 event_type=event.get("event_type"),
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to log audit event: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to log audit event: {exc}") from exc
 
     async def get_audit_trail(
         self,
@@ -518,11 +560,7 @@ class CosmosDBClient:
             if conditions:
                 where_clause = "WHERE " + " AND ".join(conditions)
 
-            query = (
-                f"SELECT TOP @limit * FROM c "
-                f"{where_clause} "
-                f"ORDER BY c.timestamp DESC"
-            )
+            query = f"SELECT TOP @limit * FROM c {where_clause} ORDER BY c.timestamp DESC"
 
             results = list(
                 container.query_items(
@@ -548,9 +586,7 @@ class CosmosDBClient:
                 patient_id=patient_id,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to retrieve audit trail: {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to retrieve audit trail: {exc}") from exc
 
     # -------------------------------------------------------------------------
     # Agent State
@@ -592,9 +628,7 @@ class CosmosDBClient:
                 session_id=session_id,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to save agent state for session '{session_id}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to save agent state for session '{session_id}': {exc}") from exc
 
     async def get_agent_state(self, session_id: str) -> dict | None:
         """Retrieve agent state for a session.
@@ -625,6 +659,4 @@ class CosmosDBClient:
                 session_id=session_id,
                 error=str(exc),
             )
-            raise AzureServiceError(
-                f"Failed to retrieve agent state for session '{session_id}': {exc}"
-            ) from exc
+            raise AzureServiceError(f"Failed to retrieve agent state for session '{session_id}': {exc}") from exc

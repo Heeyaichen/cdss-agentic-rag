@@ -8,13 +8,20 @@ submission, and patient profile retrieval.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any, Callable
 from uuid import uuid4
 
+from cdss.agents.drug_safety import DrugSafetyAgent
+from cdss.agents.guardrails import GuardrailsAgent
+from cdss.agents.medical_literature import MedicalLiteratureAgent
 from cdss.agents.orchestrator import OrchestratorAgent
+from cdss.agents.patient_history import PatientHistoryAgent
+from cdss.agents.protocol_agent import ProtocolAgent
 from cdss.core.config import Settings, get_settings
-from cdss.core.exceptions import AzureServiceError, CDSSError, ValidationError
+from cdss.core.exceptions import AzureServiceError, ValidationError
 from cdss.core.logging import get_logger
 from cdss.core.models import ClinicalQuery, ClinicalResponse
+from cdss.services.ingestion_service import DocumentIngestionService
 
 logger = get_logger(__name__)
 
@@ -36,6 +43,7 @@ class ClinicalQueryService:
         self,
         orchestrator: OrchestratorAgent | None = None,
         cosmos_client: object | None = None,
+        ingestion_service: DocumentIngestionService | None = None,
         settings: Settings | None = None,
     ) -> None:
         """Initialize the query service.
@@ -54,7 +62,7 @@ class ClinicalQueryService:
         if orchestrator is not None:
             self.orchestrator = orchestrator
         else:
-            self.orchestrator = OrchestratorAgent(settings=self.settings)
+            self.orchestrator = self._build_default_orchestrator()
 
         if cosmos_client is not None:
             self.cosmos_client = cosmos_client
@@ -63,7 +71,60 @@ class ClinicalQueryService:
         else:
             self.cosmos_client = None
 
+        self.ingestion_service = ingestion_service or DocumentIngestionService()
+
         logger.info("ClinicalQueryService initialized")
+
+    def _build_default_orchestrator(self) -> OrchestratorAgent:
+        """Build an orchestrator with concrete specialist agents.
+
+        Each specialist is initialized independently so a single failing
+        dependency does not prevent the service from starting.
+        """
+        patient_history_agent = self._safe_create_agent(
+            "patient_history",
+            lambda: PatientHistoryAgent(settings=self.settings),
+        )
+        literature_agent = self._safe_create_agent(
+            "literature",
+            lambda: MedicalLiteratureAgent(settings=self.settings),
+        )
+        protocol_agent = self._safe_create_agent(
+            "protocol",
+            lambda: ProtocolAgent(settings=self.settings),
+        )
+        drug_safety_agent = self._safe_create_agent(
+            "drug_safety",
+            lambda: DrugSafetyAgent(settings=self.settings),
+        )
+        guardrails_agent = self._safe_create_agent(
+            "guardrails",
+            lambda: GuardrailsAgent(settings=self.settings),
+        )
+
+        return OrchestratorAgent(
+            patient_history_agent=patient_history_agent,
+            literature_agent=literature_agent,
+            protocol_agent=protocol_agent,
+            drug_safety_agent=drug_safety_agent,
+            guardrails_agent=guardrails_agent,
+            settings=self.settings,
+        )
+
+    def _safe_create_agent(
+        self,
+        agent_name: str,
+        factory: Callable[[], Any],
+    ) -> object | None:
+        """Create an agent and degrade gracefully if dependencies are unavailable."""
+        try:
+            return factory()
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize specialist agent; continuing without it",
+                extra={"agent": agent_name, "error": str(exc)},
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Query processing
@@ -158,9 +219,7 @@ class ClinicalQueryService:
             )
 
         if self.cosmos_client is None:
-            logger.warning(
-                "Cosmos DB client not available; returning empty conversation history"
-            )
+            logger.warning("Cosmos DB client not available; returning empty conversation history")
             return []
 
         logger.debug(
@@ -179,6 +238,61 @@ class ClinicalQueryService:
         )
 
         return history
+
+    async def search_patients(
+        self,
+        search: str | None = None,
+        page: int = 1,
+        limit: int = 100,
+    ) -> dict:
+        """Search patient profiles with optional text filtering and pagination."""
+        if page < 1:
+            raise ValidationError(
+                message="Page must be greater than or equal to 1.",
+                field_errors={"page": "Minimum value is 1."},
+            )
+        if limit < 1:
+            raise ValidationError(
+                message="Limit must be greater than or equal to 1.",
+                field_errors={"limit": "Minimum value is 1."},
+            )
+
+        if self.cosmos_client is None:
+            logger.warning("Cosmos DB client not available; returning empty patient search results")
+            return {
+                "patients": [],
+                "page": page,
+                "page_size": limit,
+                "limit": limit,
+                "total": 0,
+            }
+
+        if not hasattr(self.cosmos_client, "search_patient_profiles"):
+            logger.warning("Cosmos client does not implement search_patient_profiles; returning empty results")
+            return {
+                "patients": [],
+                "page": page,
+                "page_size": limit,
+                "limit": limit,
+                "total": 0,
+            }
+
+        profiles = await self.cosmos_client.search_patient_profiles(
+            search=search,
+            limit=max(limit * page, limit),
+        )
+
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        paged_profiles = profiles[start_idx:end_idx]
+
+        return {
+            "patients": paged_profiles,
+            "page": page,
+            "page_size": limit,
+            "limit": limit,
+            "total": len(profiles),
+        }
 
     # ------------------------------------------------------------------
     # Feedback
@@ -221,9 +335,7 @@ class ClinicalQueryService:
             )
 
         if self.cosmos_client is None:
-            logger.warning(
-                "Cosmos DB client not available; feedback cannot be saved"
-            )
+            logger.warning("Cosmos DB client not available; feedback cannot be saved")
             return {
                 "conversation_id": conversation_id,
                 "rating": rating,
@@ -296,9 +408,7 @@ class ClinicalQueryService:
             )
 
         if self.cosmos_client is None:
-            logger.warning(
-                "Cosmos DB client not available; cannot retrieve patient profile"
-            )
+            logger.warning("Cosmos DB client not available; cannot retrieve patient profile")
             return None
 
         logger.debug(
@@ -346,9 +456,7 @@ class ClinicalQueryService:
             )
 
         if self.cosmos_client is None:
-            raise AzureServiceError(
-                "Cosmos DB client is not available. Cannot update patient profile."
-            )
+            raise AzureServiceError("Cosmos DB client is not available. Cannot update patient profile.")
 
         # Ensure the profile contains the required identifiers
         profile_data["patient_id"] = patient_id
