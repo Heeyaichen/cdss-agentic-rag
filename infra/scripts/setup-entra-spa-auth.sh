@@ -53,6 +53,44 @@ log_warn() { echo "[WARN] $1"; }
 log_error() { echo "[ERROR] $1"; }
 log_success() { echo "[SUCCESS] $1"; }
 
+get_permission_mapping_count() {
+    local spa_app_id="$1"
+    local api_app_id="$2"
+    local scope_id="$3"
+
+    python - "${spa_app_id}" "${api_app_id}" "${scope_id}" <<'PY'
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+
+spa_app_id = sys.argv[1]
+api_app_id = sys.argv[2]
+scope_id = sys.argv[3].lower()
+
+try:
+    app_json = subprocess.check_output(
+        ["az", "ad", "app", "show", "--id", spa_app_id, "-o", "json"],
+        text=True,
+    )
+    app = json.loads(app_json)
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+count = 0
+for resource_access_block in app.get("requiredResourceAccess", []) or []:
+    if resource_access_block.get("resourceAppId") != api_app_id:
+        continue
+    for resource_access in resource_access_block.get("resourceAccess", []) or []:
+        if str(resource_access.get("id", "")).lower() == scope_id and resource_access.get("type") == "Scope":
+            count += 1
+
+print(str(count))
+PY
+}
+
 resolve_container_app_name() {
     local rg="$1"
     local app_name="$2"
@@ -442,9 +480,7 @@ log_success "API scope ensured: ${SCOPE_NAME} (${SCOPE_ID})"
 az ad sp create --id "${API_APP_ID}" --only-show-errors --output none >/dev/null 2>&1 || true
 az ad sp create --id "${SPA_APP_ID}" --only-show-errors --output none >/dev/null 2>&1 || true
 
-MAPPING_COUNT="$(az ad app show --id "${SPA_APP_ID}" \
-    --query "length(requiredResourceAccess[?resourceAppId=='${API_APP_ID}'].resourceAccess[] | [?id=='${SCOPE_ID}' && type=='Scope'])" \
-    -o tsv 2>/dev/null || true)"
+MAPPING_COUNT="$(get_permission_mapping_count "${SPA_APP_ID}" "${API_APP_ID}" "${SCOPE_ID}" 2>/dev/null || true)"
 
 if [[ "${MAPPING_COUNT}" == "0" || -z "${MAPPING_COUNT}" ]]; then
     log_info "Adding delegated permission ${SCOPE_NAME} to SPA app..."
@@ -470,9 +506,7 @@ else
     log_warn "Skipping admin consent as requested."
 fi
 
-FINAL_COUNT="$(az ad app show --id "${SPA_APP_ID}" \
-    --query "length(requiredResourceAccess[?resourceAppId=='${API_APP_ID}'].resourceAccess[] | [?id=='${SCOPE_ID}' && type=='Scope'])" \
-    -o tsv 2>/dev/null || true)"
+FINAL_COUNT="$(get_permission_mapping_count "${SPA_APP_ID}" "${API_APP_ID}" "${SCOPE_ID}" 2>/dev/null || true)"
 
 log_info "Verification (expected 1): ${FINAL_COUNT:-0}"
 

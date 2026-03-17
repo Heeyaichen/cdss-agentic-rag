@@ -327,114 +327,51 @@ pip install -e ".[dev]"
 # Login to Azure
 az login
 
-# # Deploy to production environment
-# ./infra/scripts/deploy.sh prod cdss-prod-rg
+# Recommended first-run path (idempotent):
+# - creates RG + ACR if missing
+# - builds linux/amd64 backend image and pushes to ACR
+# - deploys Bicep infra + Container App
+# - handles transient OpenAI/DocIntel provisioning races with retry
+# - bootstraps AI Search indexes (temporary public toggle, then locks back down)
+# - generates .env/.env.azure
+./infra/scripts/bootstrap-deploy.sh prod cdss-prod-rg eastus2
 
-# 0) Bootstrap RG (idempotent)
-RG=cdss-prod-rg
-LOC=eastus2
-ACR_NAME=cdssacr
-IMAGE_TAG=2026.03.14.1
+cat > .env << EOF
+CDSS_PUBMED_API_KEY=
+CDSS_PUBMED_EMAIL=
+EOF
 
-az group create -n "$RG" -l "$LOC"
+# Optional: skip image build if you already pushed a tag
+# CONTAINER_IMAGE=<acr>.azurecr.io/cdss-api:<tag> \
+# SKIP_IMAGE_BUILD=true \
+# ./infra/scripts/bootstrap-deploy.sh prod cdss-prod-rg eastus2
 
-# 1) Create (or use existing) ACR
-az acr show -n "$ACR_NAME" -g "$RG" >/dev/null 2>&1 || \
-az acr create -n "$ACR_NAME" -g "$RG" -l "$LOC" --sku Standard
+# Optional: keep production API private (no public ingress)
+# PROD_PUBLIC_API=false ./infra/scripts/bootstrap-deploy.sh prod cdss-prod-rg eastus2
 
-# 2) Build/push backend image (linux/amd64 required for Container Apps)
-az acr login -n "$ACR_NAME"
-docker buildx create --name cdssbuilder --use 2>/dev/null || docker buildx use cdssbuilder
-docker buildx inspect --bootstrap
-docker buildx build --platform linux/amd64 \
-  -t "$ACR_NAME.azurecr.io/cdss-api:$IMAGE_TAG" \
-  --push .
+# Optional: run auth setup as part of bootstrap (requires Graph permissions)
+# SKIP_AUTH_SETUP=false ./infra/scripts/bootstrap-deploy.sh prod cdss-prod-rg eastus2
 
-# 2) Verify image tag exists
-az acr repository show --name "$ACR_NAME" --image "cdss-api:$IMAGE_TAG" -o table
-
-# 3) Deploy infra+app using real image + MI pull
-CONTAINER_IMAGE="$ACR_NAME.azurecr.io/cdss-api:$IMAGE_TAG" \
-ACR_NAME="$ACR_NAME" \
-./infra/scripts/deploy.sh prod "$RG" "$LOC" true
-
-# Optional: expose prod API publicly (for public Static Web App/browser access)
-# ./infra/scripts/deploy.sh prod cdss-prod-rg eastus2 true
-
-RG=cdss-prod-rg
-SEARCH_NAME=$(az search service list -g "$RG" --query "[0].name" -o tsv)
-
-# Temporarily allow public access
-az search service update -g "$RG" -n "$SEARCH_NAME" --public-network-access enabled
-
-az search service show -g "$RG" -n "$SEARCH_NAME" \
-  --query "{provisioningState:provisioningState,publicNetworkAccess:publicNetworkAccess}" -o table
-
-# Create/update indexes
-./infra/scripts/create-search-indexes.sh "$RG" "$SEARCH_NAME"
-
-# Lock it back down
-az search service update -g "$RG" -n "$SEARCH_NAME" --public-network-access disabled
-
-# 0) Set variables
+# Configure Entra SPA auth + write frontend/.env.local
 RG=cdss-prod-rg
 APP=$(az containerapp list -g "$RG" --query "[?contains(name,'-api')].name | [0]" -o tsv)
+./infra/scripts/setup-entra-spa-auth.sh --resource-group "$RG" --container-app-name "$APP"
 
-API_FQDN=$(az containerapp show -g "$RG" -n "$APP" --query properties.configuration.ingress.fqdn -o tsv)
+# Seed sample data from inside Container App network boundary
+./infra/scripts/seed-data-infra-network.sh "$RG" "$APP"
 
-# 1) Backend verification
-az containerapp show -g "$RG" -n "$APP" --query "{state:properties.provisioningState,fqdn:properties.configuration.ingress.fqdn}" -o table
-curl -s -o /dev/null -w "%{http_code}\n" "https://$API_FQDN/api/v1/health"
-az containerapp logs show -g "$RG" -n "$APP" --tail 50
-
-# 2) Generate local env files for scripts/tools
-./infra/scripts/populate-env.sh "$RG"
-
-# 3) Seed sample data for E2E (prod-safe path)
-./infra/scripts/seed-data-infra-network.sh "$RG"
-
-# 4) Allow your browser origin for frontend->backend calls
+# Allow local frontend origins for browser->API calls
 az containerapp ingress cors update -g "$RG" -n "$APP" \
   --allowed-origins http://localhost:3000 https://localhost:3000 http://localhost:3001 https://localhost:3001
 
-# Verify API auth env vars (enabled flag, JWT audience, required scopes) before configuring frontend MSAL scope
-az containerapp show -g "$RG" -n "$APP" \
-  --query "properties.template.containers[0].env[?name=='CDSS_AUTH_ENABLED'||name=='CDSS_AUTH_AUDIENCE'||name=='CDSS_AUTH_REQUIRED_SCOPES'].[name,value]" \
-  -o table
+# Verify backend health
+API_FQDN=$(az containerapp show -g "$RG" -n "$APP" --query properties.configuration.ingress.fqdn -o tsv)
+curl -s -o /dev/null -w "%{http_code}\n" "https://$API_FQDN/api/v1/health"
 
-# 5) Configure Entra SPA auth + frontend runtime in one step
-#    This script now automates:
-#    - SPA app registration discovery/creation
-#    - SPA redirect URI configuration
-#    - API app discovery/creation
-#    - API audience auto-alignment from backend CDSS_AUTH_AUDIENCE (when available)
-#    - API scope discovery/creation
-#    - SPA delegated permission assignment
-#    - admin consent (unless --skip-admin-consent)
-#    - frontend/.env.local generation
-./infra/scripts/setup-entra-spa-auth.sh \
-  --resource-group "$RG" \
-  --container-app-name "$APP"
-
-# Optional if you do not have tenant admin permissions yet:
-# ./infra/scripts/setup-entra-spa-auth.sh --resource-group "$RG" --container-app-name "$APP" --skip-admin-consent
-
-# 6) Run frontend and test in browser
-cd frontend
-npm run dev
-# open http://localhost:3000
-# if Vite reports port 3000 is in use, stop the other process or run:
-#   lsof -i :3000
-# backend docs: https://$API_FQDN/docs
-
-# # Populate Environment Files from Azure Resources
-# ./infra/scripts/populate-env.sh cdss-prod-rg
-
-# # Seed sample data from inside Azure network (recommended for prod)
-# ./infra/scripts/seed-data-infra-network.sh cdss-prod-rg
-
-# Local seeding (works best for dev/staging where public access is allowed)
-# python infra/scripts/seed_data.py --environment dev
+# Run frontend locally (Vite is intentionally configured for port 3000)
+cd frontend && npm install && npm run dev
+# Open: http://localhost:3000
+# API docs: https://$API_FQDN/docs
 ```
 
 ### 5. Run locally
@@ -716,26 +653,35 @@ open htmlcov/index.html
 
 The entire Azure infrastructure is defined as code using Azure Bicep templates.
 
-### Deploy to an environment
+### Recommended (first run, reproducible)
 
 ```bash
-# Development
-./infra/scripts/deploy.sh dev my-rg-dev
-
-# Staging
-./infra/scripts/deploy.sh staging my-rg-staging
-
-# Production
-./infra/scripts/deploy.sh prod my-rg-prod
+# One command bootstrap for new environments:
+# - creates RG + ACR when missing
+# - builds/pushes linux/amd64 backend image
+# - deploys Bicep infra + Container App
+# - retries transient Azure OpenAI/DocIntel "Accepted" provisioning races
+# - bootstraps Search indexes safely
+./infra/scripts/bootstrap-deploy.sh prod my-rg-prod eastus2
 ```
 
-### Manual Bicep deployment
+### Manual/advanced deployment
 
 ```bash
-az deployment group create \
-  --resource-group my-resource-group \
-  --template-file infra/main.bicep \
-  --parameters infra/parameters/dev.bicepparam
+# 1) Ensure RG exists first
+az group create -n my-rg-prod -l eastus2
+
+# 2) Build and push backend image (linux/amd64 required for Container Apps)
+az acr create -n <unique-acr-name> -g my-rg-prod -l eastus2 --sku Standard
+az acr login -n <unique-acr-name>
+docker buildx build --platform linux/amd64 \
+  -t <unique-acr-name>.azurecr.io/cdss-api:<tag> \
+  --push .
+
+# 3) Deploy infra + app
+CONTAINER_IMAGE=<unique-acr-name>.azurecr.io/cdss-api:<tag> \
+ACR_NAME=<unique-acr-name> \
+./infra/scripts/deploy.sh prod my-rg-prod eastus2 true
 ```
 
 ### What gets deployed

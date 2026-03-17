@@ -115,6 +115,7 @@ DEPLOYMENT_NAME="cdss-${ENVIRONMENT}-$(date +%Y%m%d%H%M%S)"
 EXTRA_BICEP_PARAMS=""
 OPENAI_RESTORE_ENABLED="false"
 DOCINTEL_RESTORE_ENABLED="false"
+MAX_DEPLOY_RETRIES="${MAX_DEPLOY_RETRIES:-3}"
 
 get_deployment_output() {
     local output_name="$1"
@@ -157,6 +158,7 @@ verify_acr_image_exists() {
     if ! az acr repository show --name "$acr_name" --image "$image_path" --output none >/dev/null 2>&1; then
         log_error "Container image not found in ACR: ${image_ref}"
         log_error "Push the exact tag first, then redeploy."
+        log_error "Tip: ./infra/scripts/bootstrap-deploy.sh can build/push/deploy in the correct order."
         return 1
     fi
 
@@ -165,56 +167,151 @@ verify_acr_image_exists() {
 
 validate_private_networking() {
     local failures=0
+    local openai_resource_id=""
+    local docintel_resource_id=""
 
-    local openai_pna
-    openai_pna=$(az cognitiveservices account show -n "${OPENAI_NAME}" -g "${RESOURCE_GROUP}" --query "properties.publicNetworkAccess" -o tsv 2>/dev/null || echo "")
-    if [[ "${openai_pna}" != "Disabled" ]]; then
-        log_error "OpenAI public network access is not disabled (current: ${openai_pna:-unknown})."
+    normalize_bool_value() {
+        echo "$1" | tr '[:upper:]' '[:lower:]'
+    }
+
+    if [[ -z "${OPENAI_NAME}" ]]; then
+        log_error "OpenAI account name could not be resolved."
         failures=$((failures + 1))
+    else
+        local openai_pna
+        openai_pna=$(az cognitiveservices account show -n "${OPENAI_NAME}" -g "${RESOURCE_GROUP}" --query "properties.publicNetworkAccess" -o tsv 2>/dev/null || echo "")
+        if [[ "$(normalize_bool_value "${openai_pna}")" != "disabled" ]]; then
+            log_error "OpenAI public network access is not disabled (current: ${openai_pna:-unknown})."
+            failures=$((failures + 1))
+        fi
+        openai_resource_id=$(az cognitiveservices account show -n "${OPENAI_NAME}" -g "${RESOURCE_GROUP}" --query "id" -o tsv 2>/dev/null || echo "")
     fi
 
-    local docintel_pna
-    docintel_pna=$(az cognitiveservices account show -n "${DOCINTEL_NAME}" -g "${RESOURCE_GROUP}" --query "properties.publicNetworkAccess" -o tsv 2>/dev/null || echo "")
-    if [[ "${docintel_pna}" != "Disabled" ]]; then
-        log_error "Document Intelligence public network access is not disabled (current: ${docintel_pna:-unknown})."
+    if [[ -z "${DOCINTEL_NAME}" ]]; then
+        log_error "Document Intelligence account name could not be resolved."
         failures=$((failures + 1))
+    else
+        local docintel_pna
+        docintel_pna=$(az cognitiveservices account show -n "${DOCINTEL_NAME}" -g "${RESOURCE_GROUP}" --query "properties.publicNetworkAccess" -o tsv 2>/dev/null || echo "")
+        if [[ "$(normalize_bool_value "${docintel_pna}")" != "disabled" ]]; then
+            log_error "Document Intelligence public network access is not disabled (current: ${docintel_pna:-unknown})."
+            failures=$((failures + 1))
+        fi
+        docintel_resource_id=$(az cognitiveservices account show -n "${DOCINTEL_NAME}" -g "${RESOURCE_GROUP}" --query "id" -o tsv 2>/dev/null || echo "")
     fi
 
     local cosmos_pna
     cosmos_pna=$(az cosmosdb show -n "${COSMOS_NAME}" -g "${RESOURCE_GROUP}" --query "publicNetworkAccess" -o tsv 2>/dev/null || echo "")
-    if [[ "${cosmos_pna}" != "Disabled" ]]; then
+    if [[ "$(normalize_bool_value "${cosmos_pna}")" != "disabled" ]]; then
         log_error "Cosmos DB public network access is not disabled (current: ${cosmos_pna:-unknown})."
         failures=$((failures + 1))
     fi
 
     local search_pna
     search_pna=$(az search service show --name "${SEARCH_NAME}" --resource-group "${RESOURCE_GROUP}" --query "publicNetworkAccess" -o tsv 2>/dev/null || echo "")
-    if [[ "${search_pna}" != "disabled" ]]; then
+    if [[ "$(normalize_bool_value "${search_pna}")" != "disabled" ]]; then
         log_error "AI Search public network access is not disabled (current: ${search_pna:-unknown})."
         failures=$((failures + 1))
     fi
 
     local openai_pe_count
-    openai_pe_count=$(az network private-endpoint list -g "${RESOURCE_GROUP}" \
-        --query "[?contains(properties.privateLinkServiceConnections[0].properties.privateLinkServiceId, 'Microsoft.CognitiveServices/accounts/${OPENAI_NAME}')] | length(@)" \
-        -o tsv 2>/dev/null || echo "0")
+    openai_pe_count="0"
+    if [[ -n "${openai_resource_id}" ]]; then
+        openai_pe_count=$(az network private-endpoint-connection list \
+            --id "${openai_resource_id}" \
+            --query "length([?properties.privateLinkServiceConnectionState.status=='Approved' || properties.privateLinkServiceConnectionState.status=='Pending'])" \
+            -o tsv 2>/dev/null || echo "0")
+    fi
     if [[ "${openai_pe_count}" -lt 1 ]]; then
-        log_error "OpenAI private endpoint not found."
+        log_error "OpenAI private endpoint connection not found."
         failures=$((failures + 1))
     fi
 
     local docintel_pe_count
-    docintel_pe_count=$(az network private-endpoint list -g "${RESOURCE_GROUP}" \
-        --query "[?contains(properties.privateLinkServiceConnections[0].properties.privateLinkServiceId, 'Microsoft.CognitiveServices/accounts/${DOCINTEL_NAME}')] | length(@)" \
-        -o tsv 2>/dev/null || echo "0")
+    docintel_pe_count="0"
+    if [[ -n "${docintel_resource_id}" ]]; then
+        docintel_pe_count=$(az network private-endpoint-connection list \
+            --id "${docintel_resource_id}" \
+            --query "length([?properties.privateLinkServiceConnectionState.status=='Approved' || properties.privateLinkServiceConnectionState.status=='Pending'])" \
+            -o tsv 2>/dev/null || echo "0")
+    fi
     if [[ "${docintel_pe_count}" -lt 1 ]]; then
-        log_error "Document Intelligence private endpoint not found."
+        log_error "Document Intelligence private endpoint connection not found."
         failures=$((failures + 1))
     fi
 
     if [[ "${failures}" -gt 0 ]]; then
         return 1
     fi
+
+    return 0
+}
+
+extract_cognitive_accounts_from_error() {
+    local error_text="$1"
+    echo "${error_text}" \
+        | grep -oE 'Microsoft\.CognitiveServices/accounts/[A-Za-z0-9-]+' \
+        | awk -F'/' '{print $NF}' \
+        | sort -u
+}
+
+is_transient_cognitive_provisioning_error() {
+    local error_text="$1"
+    if [[ "${error_text}" == *"AccountProvisioningStateInvalid"* ]]; then
+        return 0
+    fi
+    if [[ "${error_text}" == *"Microsoft.CognitiveServices/accounts"* && "${error_text}" == *"state Accepted"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+wait_for_cognitive_accounts_ready() {
+    local timeout_seconds="${1:-1800}"
+    shift || true
+    local accounts=("$@")
+    local started_at now elapsed state
+
+    if [[ ${#accounts[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    started_at="$(date +%s)"
+    for account in "${accounts[@]}"; do
+        if [[ -z "${account}" ]]; then
+            continue
+        fi
+
+        log_warn "Waiting for Cognitive account '${account}' to reach Succeeded..."
+        while true; do
+            state="$(az cognitiveservices account show \
+                --resource-group "${RESOURCE_GROUP}" \
+                --name "${account}" \
+                --query "properties.provisioningState" \
+                -o tsv 2>/dev/null || echo "Unknown")"
+
+            case "${state}" in
+                Succeeded)
+                    log_success "Cognitive account '${account}' is Succeeded."
+                    break
+                    ;;
+                Failed)
+                    log_error "Cognitive account '${account}' provisioning failed."
+                    return 1
+                    ;;
+                *)
+                    now="$(date +%s)"
+                    elapsed=$((now - started_at))
+                    if (( elapsed >= timeout_seconds )); then
+                        log_error "Timed out waiting for '${account}' (last state: ${state})."
+                        return 1
+                    fi
+                    log_info "Current state for '${account}': ${state}. Rechecking in 30s..."
+                    sleep 30
+                    ;;
+            esac
+        done
+    done
 
     return 0
 }
@@ -272,6 +369,8 @@ if [[ -n "$EFFECTIVE_CONTAINER_IMAGE" && "$EFFECTIVE_CONTAINER_IMAGE" == "$DEFAU
         log_error "Set a real image before production deployment."
         echo "Example:"
         echo "  CONTAINER_IMAGE=<acr>.azurecr.io/cdss-api:<tag> ACR_NAME=<acr> ACR_CREATE=true $0 prod ${RESOURCE_GROUP} ${LOCATION} ${PROD_PUBLIC_API_OVERRIDE:-false}"
+        echo "Or use the first-run bootstrap wrapper:"
+        echo "  ./infra/scripts/bootstrap-deploy.sh prod ${RESOURCE_GROUP} ${LOCATION}"
         exit 1
     fi
     log_warn "Container image is still the placeholder: ${DEFAULT_PLACEHOLDER_IMAGE}"
@@ -517,10 +616,48 @@ if [[ -n "${EXTRA_BICEP_PARAMS}" ]]; then
     DEPLOY_CMD="${DEPLOY_CMD} --parameters ${EXTRA_BICEP_PARAMS}"
 fi
 
-set +e
-DEPLOY_OUTPUT=$(eval "$DEPLOY_CMD" --output json 2>&1)
-DEPLOY_STATUS=$?
-set -e
+DEPLOY_ATTEMPT=1
+DEPLOY_STATUS=1
+DEPLOY_OUTPUT=""
+while (( DEPLOY_ATTEMPT <= MAX_DEPLOY_RETRIES )); do
+    log_info "Deployment attempt ${DEPLOY_ATTEMPT}/${MAX_DEPLOY_RETRIES}..."
+    set +e
+    DEPLOY_OUTPUT=$(eval "$DEPLOY_CMD" --output json 2>&1)
+    DEPLOY_STATUS=$?
+    set -e
+
+    if [[ ${DEPLOY_STATUS} -eq 0 ]]; then
+        break
+    fi
+
+    if (( DEPLOY_ATTEMPT < MAX_DEPLOY_RETRIES )) && is_transient_cognitive_provisioning_error "${DEPLOY_OUTPUT}"; then
+        log_warn "Detected transient Cognitive provisioning state issue."
+        COGNITIVE_ACCOUNTS=()
+        while IFS= read -r account; do
+            if [[ -n "${account}" ]]; then
+                COGNITIVE_ACCOUNTS+=("${account}")
+            fi
+        done < <(extract_cognitive_accounts_from_error "${DEPLOY_OUTPUT}")
+
+        if [[ ${#COGNITIVE_ACCOUNTS[@]} -eq 0 ]]; then
+            while IFS= read -r account; do
+                if [[ -n "${account}" ]]; then
+                    COGNITIVE_ACCOUNTS+=("${account}")
+                fi
+            done < <(az cognitiveservices account list \
+                --resource-group "${RESOURCE_GROUP}" \
+                --query "[?kind=='OpenAI' || kind=='FormRecognizer'].name" \
+                -o tsv 2>/dev/null || true)
+        fi
+
+        if wait_for_cognitive_accounts_ready 1800 "${COGNITIVE_ACCOUNTS[@]}"; then
+            DEPLOY_ATTEMPT=$((DEPLOY_ATTEMPT + 1))
+            continue
+        fi
+    fi
+
+    break
+done
 
 if [[ $DEPLOY_STATUS -ne 0 ]]; then
     log_error "Deployment failed!"
@@ -557,8 +694,11 @@ log_info "Fetching deployed resource details..."
 # Get resource names
 COSMOS_NAME=$(az cosmosdb list -g "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null || echo "")
 SEARCH_NAME=$(az search service list -g "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null || echo "")
-OPENAI_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='OpenAI'].name" -o tsv 2>/dev/null || echo "")
-DOCINTEL_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='FormRecognizer'].name" -o tsv 2>/dev/null || echo "")
+OPENAI_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='OpenAI'].name | [0]" -o tsv 2>/dev/null || echo "")
+DOCINTEL_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='FormRecognizer'].name | [0]" -o tsv 2>/dev/null || echo "")
+if [[ -z "${DOCINTEL_NAME}" ]]; then
+    DOCINTEL_NAME=$(az cognitiveservices account list -g "$RESOURCE_GROUP" --query "[?kind=='DocumentIntelligence'].name | [0]" -o tsv 2>/dev/null || echo "")
+fi
 STORAGE_NAME=$(az storage account list -g "$RESOURCE_GROUP" --query "[?tags.project=='cdss-agentic-rag'].name" -o tsv 2>/dev/null | head -1 || echo "")
 REDIS_NAME=$(az redis list -g "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null || echo "")
 

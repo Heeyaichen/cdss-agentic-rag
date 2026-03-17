@@ -48,7 +48,7 @@ if [[ -z "${CONTAINER_APP_NAME}" ]]; then
 fi
 
 log_info "Using Container App: ${CONTAINER_APP_NAME}"
-log_info "Preparing compact in-network seeding payload..."
+log_info "Preparing in-network seeding execution..."
 
 KEYVAULT_NAME="$(az keyvault list --resource-group "${RESOURCE_GROUP}" --query "[0].name" -o tsv 2>/dev/null || true)"
 MANAGED_IDENTITY_ID="$(az containerapp show --resource-group "${RESOURCE_GROUP}" --name "${CONTAINER_APP_NAME}" --query "keys(identity.userAssignedIdentities)[0]" -o tsv 2>/dev/null || true)"
@@ -149,15 +149,18 @@ fi
 
 log_info "Using revision: ${ACTIVE_REVISION}"
 
-REMOTE_COMMAND="python -c \"import os;from datetime import datetime,timezone;from azure.cosmos import CosmosClient;from azure.identity import DefaultAzureCredential;from azure.storage.blob import BlobServiceClient;cred=DefaultAzureCredential();db=CosmosClient(os.environ['CDSS_AZURE_COSMOS_ENDPOINT'],cred).get_database_client(os.getenv('CDSS_AZURE_COSMOS_DATABASE_NAME','cdss-db'));now=datetime.now(timezone.utc).isoformat();patient={'id':'patient_12345','patient_id':'patient_12345','name':'Jane Doe','conditions':['T2DM','CKD3'],'medications':['Metformin','Lisinopril'],'created_at':now,'updated_at':now};db.get_container_client('patient-profiles').upsert_item(patient);blob=BlobServiceClient(account_url=os.environ['CDSS_AZURE_BLOB_ENDPOINT'],credential=cred);blob.get_blob_client(container='treatment-protocols',blob='ENDO-DM-CKD-2025-v3.md').upload_blob('Protocol seed content',overwrite=True);blob.get_blob_client(container='staging-documents',blob='lab_report_patient_12345_20260128.txt').upload_blob('HbA1c 8.4; eGFR 42; UACR 110',overwrite=True);print('Seeding completed')\""
-REMOTE_COMMAND_LENGTH=${#REMOTE_COMMAND}
-log_info "Remote command length: ${REMOTE_COMMAND_LENGTH} characters"
+# Keep command short to avoid Azure CLI websocket URL length limits (414 errors).
+REMOTE_COMMAND="python -m cdss.tools.seed_sample_data"
+log_info "Executing in-network seeding module inside Container App..."
 
-log_info "Executing seeding payload inside Container App network..."
-az containerapp exec \
+if ! az containerapp exec \
     --resource-group "${RESOURCE_GROUP}" \
     --name "${CONTAINER_APP_NAME}" \
     --revision "${ACTIVE_REVISION}" \
-    --command "${REMOTE_COMMAND}"
+    --command "${REMOTE_COMMAND}"; then
+    log_error "In-network seed command failed."
+    log_error "Ensure the backend image includes 'cdss.tools.seed_sample_data' and redeploy if needed."
+    exit 1
+fi
 
 log_info "Done."

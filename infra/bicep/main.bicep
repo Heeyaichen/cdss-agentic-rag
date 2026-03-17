@@ -1920,8 +1920,10 @@ resource searchIndexDeploymentScript 'Microsoft.Resources/deploymentScripts@2023
 
         az rest --method put \
           --url "${SEARCH_ENDPOINT}/indexes/${index_name}?api-version=2024-05-01-preview" \
-          --headers "Content-Type=application/json api-key=${SEARCH_ADMIN_KEY}" \
-          --body "$index_json"
+          --skip-authorization-header \
+          --headers "Content-Type=application/json" "api-key=${SEARCH_ADMIN_KEY}" \
+          --body "$index_json" \
+          --output none
 
         echo "Index $index_name created/updated successfully"
       }
