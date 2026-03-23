@@ -336,10 +336,12 @@ az login
 # - generates .env/.env.azure
 ./infra/scripts/bootstrap-deploy.sh prod cdss-prod-rg eastus2
 
-cat > .env << EOF
-CDSS_PUBMED_API_KEY=
-CDSS_PUBMED_EMAIL=
-EOF
+# Use sed to update only those two existing keys in-place:
+sed -i '' 's|^CDSS_PUBMED_API_KEY=.*$|CDSS_PUBMED_API_KEY=<your-pubmed-api-key>|' .env
+sed -i '' 's|^CDSS_PUBMED_EMAIL=.*$|CDSS_PUBMED_EMAIL=<your-email@example.com>|' .env
+
+# Verify
+grep -E '^CDSS_PUBMED_API_KEY=|^CDSS_PUBMED_EMAIL=' .env
 
 # Optional: skip image build if you already pushed a tag
 # CONTAINER_IMAGE=<acr>.azurecr.io/cdss-api:<tag> \
