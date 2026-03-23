@@ -1,0 +1,269 @@
+import { http, HttpResponse, delay } from 'msw';
+import { mockPatients } from './data/patients';
+import { mockClinicalResponse } from './data/clinical';
+import { mockArticles } from './data/literature';
+import { mockAuditLog, mockDashboardStats } from './data/audit';
+
+const API_BASE = '/api/v1';
+type MockIngestionStatus = {
+  document_id: string;
+  filename: string;
+  document_type: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  progress: number;
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+  poll_count: number;
+};
+
+const mockIngestionJobs = new Map<string, MockIngestionStatus>();
+
+async function buildMockStreamingResponse() {
+  const sseEvents = [
+    { event: 'processing', data: { status: 'started', message: 'Processing clinical query...', session_id: 'mock-session-' + Date.now() } },
+    { event: 'progress', data: { phase: 'planning', message: 'Analyzing query and creating execution plan...' } },
+    { event: 'agent_result', data: { agent: 'patient_history', summary: 'Retrieved patient profile with 3 active conditions.', sources_retrieved: 3, latency_ms: 450 } },
+    { event: 'agent_result', data: { agent: 'medical_literature', summary: 'Found 8 relevant articles on diabetes and CKD management.', sources_retrieved: 8, latency_ms: 1200 } },
+    { event: 'agent_result', data: { agent: 'protocol', summary: 'Retrieved ADA guidelines for diabetes management.', sources_retrieved: 2, latency_ms: 380 } },
+    { event: 'agent_result', data: { agent: 'drug_safety', summary: 'Identified 1 moderate drug interaction.', sources_retrieved: 4, latency_ms: 520 } },
+    { event: 'complete', data: mockClinicalResponse },
+  ];
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      for (const { event, data } of sseEvents) {
+        await delay(500);
+        const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+        controller.enqueue(encoder.encode(message));
+      }
+      controller.close();
+    },
+  });
+
+  return new HttpResponse(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  });
+}
+
+export const handlers = [
+  // Health check
+  http.get(`${API_BASE}/health`, () => {
+    return HttpResponse.json({
+      status: 'healthy',
+      version: '1.0.0',
+      services: {
+        openai: 'healthy',
+        cosmos: 'healthy',
+        redis: 'healthy',
+        search: 'healthy',
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }),
+
+  // Patient endpoints
+  http.get(`${API_BASE}/patients/:id`, async ({ params }) => {
+    await delay(300);
+    const patient = mockPatients.find(p => p.patient_id === params.id);
+    if (!patient) {
+      return new HttpResponse(null, { status: 404 });
+    }
+    return HttpResponse.json(patient);
+  }),
+
+  http.get(`${API_BASE}/patients`, async ({ request }) => {
+    await delay(400);
+    const url = new URL(request.url);
+    const search = url.searchParams.get('search') || '';
+    
+    let filtered = mockPatients;
+    if (search) {
+      filtered = mockPatients.filter(p => 
+        p.patient_id.toLowerCase().includes(search.toLowerCase()) ||
+        p.demographics.sex.toLowerCase().includes(search.toLowerCase())
+      );
+    }
+    
+    return HttpResponse.json({
+      patients: filtered,
+      total: filtered.length,
+      page: 1,
+      page_size: 20,
+    });
+  }),
+
+  // Clinical query endpoints
+  http.post(`${API_BASE}/query`, async () => {
+    await delay(1500);
+    return HttpResponse.json({
+      query_id: 'query_' + Date.now(),
+      status: 'completed',
+      clinical_response: mockClinicalResponse,
+    });
+  }),
+
+  http.get(`${API_BASE}/query/stream`, async () => buildMockStreamingResponse()),
+  http.post(`${API_BASE}/query/stream`, async () => buildMockStreamingResponse()),
+
+  // Drug interaction check
+  http.post(`${API_BASE}/drugs/interactions`, async ({ request }) => {
+    await delay(800);
+    const body = await request.json();
+    const medications = (body as unknown as { medications?: { name: string; rxnorm_cui?: string; dose: string; frequency: string }[] }).medications ?? [];
+    
+    const interactions: Array<{
+      drug_a: string;
+      drug_b: string;
+      severity: 'minor' | 'moderate' | 'major';
+      description: string;
+      evidence_level: number;
+      source: string;
+    }> = [];
+    const severityLevels = ['minor', 'moderate', 'major'] as const;
+    for (let i = 0; i < medications.length; i++) {
+      for (let j = i + 1; j < medications.length; j++) {
+        if (Math.random() > 0.5) {
+          interactions.push({
+            drug_a: medications[i].name,
+            drug_b: medications[j].name,
+            severity: severityLevels[Math.floor(Math.random() * severityLevels.length)],
+            description: `Potential interaction between ${medications[i].name} and ${medications[j].name}. Monitor patient closely.`,
+            evidence_level: Math.floor(Math.random() * 3) + 1,
+            source: 'DrugBank 2024',
+          });
+        }
+      }
+    }
+    
+    return HttpResponse.json({
+      interactions,
+      alternatives: [],
+      dosage_adjustments: [],
+    });
+  }),
+
+  // Literature search
+  http.post(`${API_BASE}/search/literature`, async ({ request }) => {
+    await delay(1200);
+    const body = await request.json();
+    const maxResults = (body as any)?.max_results || 10;
+    
+    return HttpResponse.json({
+      papers: mockArticles.slice(0, maxResults),
+      total: mockArticles.length,
+      page: 1,
+      page_size: maxResults,
+    });
+  }),
+
+  // Protocol search
+  http.post(`${API_BASE}/search/protocols`, async ({ request }) => {
+    await delay(600);
+    const body = await request.json();
+    
+    return HttpResponse.json({
+      protocols: [
+        {
+          guideline_name: 'ADA Standards of Medical Care in Diabetes - 2024',
+          version: '2024.1',
+          recommendation: 'For patients with T2DM and CKD, consider SGLT2 inhibitors for renal protection.',
+          evidence_grade: 'A',
+          specialty: 'Endocrinology',
+          contraindications: ['eGFR < 30 mL/min for some SGLT2i'],
+          last_updated: '2024-01-01',
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 10,
+    });
+  }),
+
+  // Document ingestion
+  http.post(`${API_BASE}/documents/ingest`, async ({ request }) => {
+    await delay(1000);
+    const formData = await request.formData();
+    const file = formData.get('file');
+    const documentType = String(formData.get('document_type') || 'patient_record');
+    const documentId = 'doc_' + Date.now();
+    const now = new Date().toISOString();
+
+    mockIngestionJobs.set(documentId, {
+      document_id: documentId,
+      filename: file instanceof File ? file.name : 'uploaded-document',
+      document_type: documentType,
+      status: 'queued',
+      progress: 0,
+      created_at: now,
+      updated_at: now,
+      error: null,
+      poll_count: 0,
+    });
+
+    return HttpResponse.json({
+      document_id: documentId,
+      status: 'queued',
+      message: 'Document accepted for ingestion. Processing started.',
+      estimated_completion_seconds: 45,
+      chunks_count: Math.floor(Math.random() * 20) + 5,
+    });
+  }),
+
+  // Document ingestion status
+  http.get(`${API_BASE}/documents/:documentId/status`, async ({ params }) => {
+    await delay(350);
+    const documentId = String(params.documentId);
+    const current = mockIngestionJobs.get(documentId);
+
+    if (!current) {
+      return HttpResponse.json({ detail: `Document '${documentId}' not found.` }, { status: 404 });
+    }
+
+    const next = { ...current };
+    next.poll_count += 1;
+    next.updated_at = new Date().toISOString();
+
+    if (next.status === 'queued') {
+      next.status = 'processing';
+      next.progress = 15;
+    } else if (next.status === 'processing') {
+      next.progress = Math.min(100, next.progress + 25 + Math.floor(Math.random() * 20));
+      if (next.progress >= 100) {
+        next.status = 'completed';
+        next.progress = 100;
+      }
+    }
+
+    mockIngestionJobs.set(documentId, next);
+    return HttpResponse.json({
+      document_id: next.document_id,
+      filename: next.filename,
+      document_type: next.document_type,
+      status: next.status,
+      progress: next.progress,
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+      error: next.error,
+    });
+  }),
+
+  // Audit trail
+  http.get(`${API_BASE}/audit`, async ({ request }) => {
+    await delay(500);
+    const url = new URL(request.url);
+    const eventType = url.searchParams.get('event_type');
+    
+    let filtered = mockAuditLog;
+    if (eventType) {
+      filtered = mockAuditLog.filter(e => e.event_type.includes(eventType));
+    }
+    
+    return HttpResponse.json(filtered);
+  }),
+];
