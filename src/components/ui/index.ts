@@ -1,21 +1,50 @@
-export { default as Button } from './Button';
-export { default as Card, CardHeader } from './Card';
-export type { CardProps, CardVariant, CardHeaderProps } from './Card';
+// src/components/ui/index.ts
+// Re-export all shadcn/ui components and custom UI primitives
 
-export { default as Input, SearchInput, PasswordInput, Textarea } from './Input';
-export type { InputProps, InputVariant, InputSize } from './Input';
-
-export { default as Alert, ErrorAlert, WarningAlert, InfoAlert, SuccessAlert } from './Alert';
-export type { AlertProps, AlertSeverity, AlertVariant } from './Alert';
-
-export { default as Badge, StatusBadge } from './Badge';
-export type { BadgeProps, BadgeVariant, BadgeSize } from './Badge';
-
-export { default as Chip, TagChip, SeverityChip, FilterChip } from './Chip';
-export type { ChipProps, ChipVariant, ChipColor, ChipSize } from './Chip';
-
-export { default as Skeleton, SkeletonGroup, CardSkeleton, TableRowSkeleton } from './Skeleton';
-export type { SkeletonProps, SkeletonVariant, SkeletonAnimation } from './Skeleton';
-
-export { PageContainer, PageHeader, SectionCard } from "./PagePrimitives";
-export type { PageContainerProps, PageHeaderProps, SectionCardProps } from "./PagePrimitives";
+// shadcn/ui components
+export { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "./accordion";
+export { Alert, AlertDescription, AlertTitle } from "./alert";
+export { Badge, badgeVariants } from "./badge";
+export { Button, buttonVariants } from "./button";
+export {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "./card";
+export { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./collapsible";
+export {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "./dialog";
+export {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuPortal,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "./dropdown-menu";
+export { PageContainer } from "./PageContainer";
+export { PageHeader } from "./PageHeader";
+export { Progress } from "./progress";
+export { ScrollArea, ScrollBar } from "./scroll-area";
+export { Separator } from "./separator";
+export { Skeleton } from "./skeleton";
+export { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
+export { Textarea } from "./textarea";
+export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";

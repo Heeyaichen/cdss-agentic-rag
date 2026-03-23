@@ -115,10 +115,11 @@ export const tokens = {
     modal: "200",
     alert: "300",
     toast: "400",
-  } as const,
+  },
 } as const;
 
+// Type exports
 export type DesignTokens = typeof tokens;
 export type AlertSeverity = keyof typeof tokens.color.alert;
-export type ConfidenceLevel = keyof typeof tokens.color.confidence;
+export type ConfidenceLevel = "high" | "moderate" | "low" | "insufficient";
 export type AgentType = keyof typeof tokens.color.agent;

@@ -1,222 +1,76 @@
-/**
- * CDSS Alert Component
- *
- * Alert component with variants for displaying contextual messages.
- * Uses design tokens from the theme system for consistent styling.
- *
- * @module Alert
- */
+import * as React from "react"
+import { cva, type VariantProps } from "class-variance-authority"
 
-import React, { forwardRef, ReactNode } from 'react';
-import {
-  Alert as MuiAlert,
-  AlertProps as MuiAlertProps,
-  AlertTitle,
-  Box,
-  IconButton,
-  Typography,
-} from '@mui/material';
-import { Close } from '@mui/icons-material';
-import { alpha } from '@mui/material/styles';
-import { severity, semantic, primary } from '@/theme/palette';
-import { borderRadius, transitions } from '@/theme/designTokens';
-import { clinicalShadows } from '@/theme/shadows';
+import { cn } from "@/lib/utils"
 
-// ============================================================================
-// TYPES
-// ============================================================================
+const alertVariants = cva(
+  "group/alert relative grid w-full gap-0.5 rounded-lg border px-2.5 py-2 text-left text-sm has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg]:text-current *:[svg:not([class*='size-'])]:size-4",
+  {
+    variants: {
+      variant: {
+        default: "bg-card text-card-foreground",
+        destructive:
+          "bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+    },
+  }
+)
 
-export type AlertSeverity = 'info' | 'warning' | 'error' | 'success';
-export type AlertVariant = 'standard' | 'filled' | 'outlined' | 'clinical';
-
-export interface AlertProps extends Omit<MuiAlertProps, 'severity' | 'variant' | 'title'> {
-  /** Alert severity level */
-  severity?: AlertSeverity;
-  /** Alert variant style */
-  variant?: AlertVariant;
-  /** Alert title */
-  title?: ReactNode;
-  /** Show close button */
-  onClose?: () => void;
-  /** Icon to display */
-  icon?: ReactNode;
-  /** Make alert full width */
-  fullWidth?: boolean;
+function Alert({
+  className,
+  variant,
+  ...props
+}: React.ComponentProps<"div"> & VariantProps<typeof alertVariants>) {
+  return (
+    <div
+      data-slot="alert"
+      role="alert"
+      className={cn(alertVariants({ variant }), className)}
+      {...props}
+    />
+  )
 }
 
-// ============================================================================
-// SEVERITY CONFIG
-// ============================================================================
+function AlertTitle({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="alert-title"
+      className={cn(
+        "font-heading font-medium group-has-[>svg]/alert:col-start-2 [&_a]:underline [&_a]:underline-offset-3 [&_a]:hover:text-foreground",
+        className
+      )}
+      {...props}
+    />
+  )
+}
 
-const severityConfig: Record<AlertSeverity, { color: string }> = {
-  info: { color: semantic.info.main },
-  warning: { color: semantic.warning.main },
-  error: { color: severity.major.main },
-  success: { color: semantic.success.main },
-};
+function AlertDescription({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="alert-description"
+      className={cn(
+        "text-sm text-balance text-muted-foreground md:text-pretty [&_a]:underline [&_a]:underline-offset-3 [&_a]:hover:text-foreground [&_p:not(:last-child)]:mb-4",
+        className
+      )}
+      {...props}
+    />
+  )
+}
 
-// ============================================================================
-// VARIANT STYLES
-// ============================================================================
+function AlertAction({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="alert-action"
+      className={cn("absolute top-2 right-2", className)}
+      {...props}
+    />
+  )
+}
 
-const getVariantStyles = (
-  variant: AlertVariant,
-  alertSeverity: AlertSeverity
-): object => {
-  const { color } = severityConfig[alertSeverity];
-  const clinicalShadowBySeverity: Record<AlertSeverity, string> = {
-    info: clinicalShadows.info,
-    warning: clinicalShadows.warning,
-    error: clinicalShadows.critical,
-    success: clinicalShadows.success,
-  };
-
-  const styles: Record<AlertVariant, object> = {
-    standard: {
-      backgroundColor: alpha(color, 0.12),
-      color: color,
-      border: 'none',
-      '& .MuiAlert-icon': {
-        color: color,
-      },
-    },
-    filled: {
-      backgroundColor: color,
-      color: primary.contrastText,
-      border: 'none',
-      '& .MuiAlert-icon': {
-        color: primary.contrastText,
-      },
-    },
-    outlined: {
-      backgroundColor: 'transparent',
-      color: color,
-      border: `1px solid ${color}`,
-      '& .MuiAlert-icon': {
-        color: color,
-      },
-    },
-    clinical: {
-      backgroundColor: alpha(color, 0.08),
-      color: color,
-      borderLeft: `4px solid ${color}`,
-      boxShadow: clinicalShadowBySeverity[alertSeverity],
-      '& .MuiAlert-icon': {
-        color: color,
-      },
-      '& .MuiAlert-message': {
-        fontWeight: 500,
-      },
-    },
-  };
-
-  return styles[variant];
-};
-
-// ============================================================================
-// COMPONENT
-// ============================================================================
-
-/**
- * Enhanced Alert component with clinical styling.
- *
- * @example
- * ```tsx
- * <Alert severity="error" variant="clinical" title="Drug Interaction">
- *   Critical drug interaction detected between medications.
- * </Alert>
- * ```
- */
-export const Alert = forwardRef<HTMLDivElement, AlertProps>(
-  (
-    {
-      severity: alertSeverity = 'info',
-      variant = 'standard',
-      title,
-      onClose,
-      icon,
-      fullWidth = false,
-      children,
-      sx,
-      ...props
-    },
-    ref
-  ) => {
-    return (
-      <MuiAlert
-        ref={ref}
-        severity={alertSeverity === 'error' ? 'error' : alertSeverity}
-        icon={icon}
-        sx={{
-          borderRadius: borderRadius.md,
-          transition: transitions.common,
-          ...(fullWidth && { width: '100%' }),
-
-          // Variant styles
-          ...getVariantStyles(variant, alertSeverity),
-
-          // Override with custom sx
-          ...sx,
-        }}
-        {...props}
-      >
-        {title && <AlertTitle>{title}</AlertTitle>}
-        {children}
-        {onClose && (
-          <Box sx={{ position: 'absolute', right: 8, top: 8 }}>
-            <IconButton
-              size="small"
-              onClick={onClose}
-              sx={{
-                padding: 0.5,
-                color: 'inherit',
-              }}
-            >
-              <Close fontSize="small" />
-            </IconButton>
-          </Box>
-        )}
-      </MuiAlert>
-    );
-  }
-);
-
-Alert.displayName = 'Alert';
-
-export default Alert;
-
-// ============================================================================
-// SPECIALIZED ALERTS
-// ============================================================================
-
-export interface ErrorAlertProps extends Omit<AlertProps, 'severity'> {}
-
-export const ErrorAlert: React.FC<ErrorAlertProps> = (props) => (
-  <Alert severity="error" {...props} />
-);
-
-ErrorAlert.displayName = 'ErrorAlert';
-
-export interface WarningAlertProps extends Omit<AlertProps, 'severity'> {}
-
-export const WarningAlert: React.FC<WarningAlertProps> = (props) => (
-  <Alert severity="warning" {...props} />
-);
-
-WarningAlert.displayName = 'WarningAlert';
-
-export interface InfoAlertProps extends Omit<AlertProps, 'severity'> {}
-
-export const InfoAlert: React.FC<InfoAlertProps> = (props) => (
-  <Alert severity="info" {...props} />
-);
-
-InfoAlert.displayName = 'InfoAlert';
-
-export interface SuccessAlertProps extends Omit<AlertProps, 'severity'> {}
-
-export const SuccessAlert: React.FC<SuccessAlertProps> = (props) => (
-  <Alert severity="success" {...props} />
-);
-
-SuccessAlert.displayName = 'SuccessAlert';
+export { Alert, AlertTitle, AlertDescription, AlertAction }

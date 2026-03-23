@@ -1,228 +1,103 @@
-/**
- * CDSS Card Component
- *
- * Card container with variants and clinical styling.
- * Uses design tokens from the theme system for consistent styling.
- *
- * @module Card
- */
+import * as React from "react"
 
-import React, { forwardRef, ReactNode } from "react";
-import { Box, Card as MuiCard, CardContent, CardProps as MuiCardProps, Skeleton as MuiSkeleton } from "@mui/material";
-import { alpha } from "@mui/material/styles";
-import { borderRadius } from "@/theme/designTokens";
-import { transitions } from "@/theme/motion";
-import { primary } from "@/theme/palette";
-import { shadows } from "@/theme/shadows";
+import { cn } from "@/lib/utils"
 
-export type CardVariant = "default" | "elevated" | "outlined" | "clinical";
-
-export interface CardProps extends Omit<MuiCardProps, 'variant'> {
-  /** Card variant style */
-  variant?: CardVariant;
-  /** Show loading skeleton */
-  loading?: boolean;
-  /** Card header content */
-  header?: ReactNode;
-  /** Card footer content */
-  footer?: ReactNode;
-  /** Enable hover effects */
-  hoverable?: boolean;
-  /** Accent color for clinical variant */
-  accentColor?: string;
+function Card({
+  className,
+  size = "default",
+  ...props
+}: React.ComponentProps<"div"> & { size?: "default" | "sm" }) {
+  return (
+    <div
+      data-slot="card"
+      data-size={size}
+      className={cn(
+        "group/card flex flex-col gap-4 overflow-hidden rounded-xl bg-card py-4 text-sm text-card-foreground ring-1 ring-foreground/10 has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:gap-3 data-[size=sm]:py-3 data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
+        className
+      )}
+      {...props}
+    />
+  )
 }
 
-// ============================================================================
-// VARIANT STYLES
-// ============================================================================
-
-const getVariantStyles = (variant: CardVariant, accentColor?: string): object => {
-  const accent = accentColor || primary.main;
-
-  const styles: Record<CardVariant, object> = {
-    default: {
-      backgroundColor: 'background.paper',
-      boxShadow: shadows[1],
-    },
-    elevated: {
-      backgroundColor: 'background.paper',
-      boxShadow: shadows[3],
-      transform: 'translateY(0)',
-    },
-    outlined: {
-      backgroundColor: 'background.paper',
-      border: `1px solid`,
-      borderColor: 'divider',
-      boxShadow: 'none',
-    },
-    clinical: {
-      backgroundColor: 'background.paper',
-      borderLeft: `4px solid ${accent}`,
-      boxShadow: shadows[2],
-    },
-  };
-
-  return styles[variant];
-};
-
-// ============================================================================
-// COMPONENT
-// ============================================================================
-
-/**
- * Enhanced Card component with clinical styling.
- *
- * @example
- * ```tsx
- * <Card variant="clinical" accentColor="#DC2626">
- *   <CardContent>
- *     Drug Interaction Alert
- *   </CardContent>
- * </Card>
- *
- * <Card variant="elevated" hoverable>
- *   <CardContent>
- *     Hoverable elevated card
- *   </CardContent>
- * </Card>
- */
-const Card = forwardRef<HTMLDivElement, CardProps>(
-  (
-    {
-      variant = "default",
-      loading = false,
-      hoverable = false,
-      children,
-      header,
-      footer,
-      accentColor,
-      sx,
-      ...props
-    },
-    ref
-  ) => {
-    return (
-      <MuiCard
-        ref={ref}
-        sx={{
-          // Base styles
-          borderRadius: borderRadius.md,
-          transition: transitions.shadow.standard,
-          overflow: "hidden",
-
-          // Variant styles
-          ...getVariantStyles(variant, accentColor),
-
-          // Hoverable state
-          ...(hoverable && {
-            cursor: "pointer",
-            "&:hover": {
-              boxShadow: shadows[3],
-              transform: "translateY(-2px)",
-            },
-          }),
-
-          // Override with custom sx
-          ...sx,
-        }}
-        {...props}
-      >
-        {/* Header */}
-        {header && (
-          <Box
-            sx={{
-              p: 2,
-              borderBottom: "1px solid",
-              borderColor: "divider",
-              bgcolor: alpha(primary.main, 0.02),
-            }}
-          >
-            {header}
-          </Box>
-        )}
-
-        {/* Content or Loading Skeleton */}
-        {loading ? (
-          <CardContent>
-            <MuiSkeleton variant="text" width="80%" height={24} sx={{ mb: 1 }} />
-            <MuiSkeleton variant="text" width="60%" height={20} sx={{ mb: 1 }} />
-            <MuiSkeleton variant="rectangular" width="100%" height={60} />
-          </CardContent>
-        ) : (
-          children && <CardContent>{children}</CardContent>
-        )}
-
-        {/* Footer */}
-        {footer && (
-          <Box
-            sx={{
-              p: 2,
-              borderTop: "1px solid",
-              borderColor: "divider",
-              bgcolor: alpha("#000000", 0.02),
-              display: "flex",
-              justifyContent: "flex-end",
-              gap: 1,
-            }}
-          >
-            {footer}
-          </Box>
-        )}
-      </MuiCard>
-    );
-  }
-);
-
-Card.displayName = 'Card';
-
-export default Card;
-
-// ============================================================================
-// SUB-COMPONENTS
-// ============================================================================
-
-/**
- * CardHeader component for structured card headers.
- */
-export interface CardHeaderProps {
-  title: ReactNode;
-  subtitle?: ReactNode;
-  action?: ReactNode;
+function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-header"
+      className={cn(
+        "group/card-header @container/card-header grid auto-rows-min items-start gap-1 rounded-t-xl px-4 group-data-[size=sm]/card:px-3 has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-4 group-data-[size=sm]/card:[.border-b]:pb-3",
+        className
+      )}
+      {...props}
+    />
+  )
 }
 
-export const CardHeader: React.FC<CardHeaderProps> = ({ title, subtitle, action }) => (
-  <Box
-    sx={{
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "flex-start",
-      mb: 2,
-    }}
-  >
-    <Box sx={{ flex: 1 }}>
-      {typeof title === 'string' ? (
-        <Box component="h3" sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary", m: 0 }}>
-          {title}
-        </Box>
-      ) : (
-        title
+function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-title"
+      className={cn(
+        "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",
+        className
       )}
-      {subtitle && (
-        <Box
-          component="p"
-          sx={{
-            fontSize: "0.875rem",
-            color: "text.secondary",
-            m: 0,
-            mt: 0.5,
-          }}
-        >
-          {subtitle}
-        </Box>
-      )}
-    </Box>
-    {action && <Box sx={{ ml: 2 }}>{action}</Box>}
-  </Box>
-);
+      {...props}
+    />
+  )
+}
 
-CardHeader.displayName = 'CardHeader';
+function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-description"
+      className={cn("text-sm text-muted-foreground", className)}
+      {...props}
+    />
+  )
+}
+
+function CardAction({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-action"
+      className={cn(
+        "col-start-2 row-span-2 row-start-1 self-start justify-self-end",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function CardContent({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-content"
+      className={cn("px-4 group-data-[size=sm]/card:px-3", className)}
+      {...props}
+    />
+  )
+}
+
+function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-footer"
+      className={cn(
+        "flex items-center rounded-b-xl border-t bg-muted/50 p-4 group-data-[size=sm]/card:p-3",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+export {
+  Card,
+  CardHeader,
+  CardFooter,
+  CardTitle,
+  CardAction,
+  CardDescription,
+  CardContent,
+}
