@@ -12,7 +12,7 @@ import type {
   ApiError,
 } from "@/types/cdss";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 // API Error handler
 async function handleApiResponse<T>(response: Response): Promise<T> {
