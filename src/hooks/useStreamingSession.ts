@@ -3,6 +3,7 @@
 
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { runtimeConfig } from "@/config/runtime";
 import type { StreamingEvent } from "@/types/cdss";
 
 interface UseStreamingSessionOptions {
@@ -21,7 +22,7 @@ interface UseStreamingSessionReturn {
 }
 
 const RETRY_DELAYS = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
-const WS_ENDPOINT = import.meta.env.VITE_WS_ENDPOINT || import.meta.env.NEXT_PUBLIC_WS_ENDPOINT;
+const WS_ENDPOINT = runtimeConfig.wsEndpoint;
 
 export function useStreamingSession({
   sessionId,

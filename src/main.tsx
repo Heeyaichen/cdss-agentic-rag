@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import { initializeAuth } from "./lib/auth";
+import { runtimeConfig } from "./config/runtime";
 import { useThemeStore } from "./stores/userStore";
 import { darkTheme, injectCssCustomProperties, lightTheme } from "./theme";
 // Theme is now imported from @/theme - old inline theme definitions removed
@@ -35,7 +36,7 @@ function ThemedApp() {
 }
 
 async function enableMocking() {
-  const useMockApi = import.meta.env.VITE_USE_MOCK_API === "true";
+  const useMockApi = runtimeConfig.useMockApi;
   
   if (import.meta.env.DEV && useMockApi) {
     const { worker } = await import("./mocks/browser");

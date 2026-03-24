@@ -11,8 +11,18 @@ import type {
   QueryResponse,
   ApiError,
 } from "@/types/cdss";
+import { getAccessToken } from "@/lib/auth";
+import { runtimeConfig } from "@/config/runtime";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE = runtimeConfig.apiBaseUrl;
+
+async function buildAuthHeaders(): Promise<HeadersInit> {
+  const token = await getAccessToken();
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
 
 // API Error handler
 async function handleApiResponse<T>(response: Response): Promise<T> {
@@ -34,7 +44,9 @@ export function usePatientProfile(patientId: string | null) {
   return useQuery<PatientProfile, Error>({
     queryKey: ["patient-profile", patientId],
     queryFn: async () => {
-      const response = await fetch(`${API_BASE}/api/v1/patients/${patientId}`);
+      const response = await fetch(`${API_BASE}/v1/patients/${patientId}`, {
+        headers: await buildAuthHeaders(),
+      });
       return handleApiResponse<PatientProfile>(response);
     },
     enabled: !!patientId,
@@ -50,7 +62,9 @@ export function useConversationHistory(sessionId: string | null) {
   return useQuery<ConversationTurn[], Error>({
     queryKey: ["conversation", sessionId],
     queryFn: async () => {
-      const response = await fetch(`${API_BASE}/api/v1/sessions/${sessionId}/turns`);
+      const response = await fetch(`${API_BASE}/v1/sessions/${sessionId}/turns`, {
+        headers: await buildAuthHeaders(),
+      });
       return handleApiResponse<ConversationTurn[]>(response);
     },
     enabled: !!sessionId,
@@ -65,9 +79,9 @@ export function useSubmitQuery() {
 
   return useMutation<QueryResponse, Error, ClinicalQuery>({
     mutationFn: async (payload: ClinicalQuery) => {
-      const response = await fetch(`${API_BASE}/api/v1/query`, {
+      const response = await fetch(`${API_BASE}/v1/query`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await buildAuthHeaders(),
         body: JSON.stringify(payload),
       });
       return handleApiResponse<QueryResponse>(response);
@@ -91,9 +105,9 @@ export function useCreateSession() {
     { patient_id: string }
   >({
     mutationFn: async ({ patient_id }) => {
-      const response = await fetch(`${API_BASE}/api/v1/sessions`, {
+      const response = await fetch(`${API_BASE}/v1/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await buildAuthHeaders(),
         body: JSON.stringify({ patient_id }),
       });
       return handleApiResponse<{ session_id: string; patient_id: string }>(response);
@@ -109,9 +123,9 @@ export function useSubmitFeedback() {
     { turnId: string; rating: number; correction?: string }
   >({
     mutationFn: async ({ turnId, rating, correction }) => {
-      const response = await fetch(`${API_BASE}/api/v1/turns/${turnId}/feedback`, {
+      const response = await fetch(`${API_BASE}/v1/turns/${turnId}/feedback`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await buildAuthHeaders(),
         body: JSON.stringify({
           clinician_rating: rating,
           clinician_correction: correction || null,
