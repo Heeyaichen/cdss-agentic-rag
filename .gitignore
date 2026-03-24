@@ -58,6 +58,11 @@ dmypy.json
 .env
 .env.*
 !.env.example
+!frontend/.env.example
+!frontend/.env.production
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
 *.pem
 *.key
 *.crt

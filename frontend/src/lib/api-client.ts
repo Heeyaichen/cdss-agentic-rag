@@ -1,5 +1,6 @@
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
 import { msalInstance } from './auth';
+import { runtimeConfig } from "@/config/runtime";
 import {
   ApiError,
   ClinicalResponse,
@@ -12,7 +13,7 @@ import {
 
 function resolveApiBaseUrl(rawValue: string | undefined): string {
   const value = (rawValue || '/api').trim();
-  if (import.meta.env.PROD) {
+  if (runtimeConfig.environment === "production") {
     const isAbsolute = /^https?:\/\//i.test(value);
     if (!isAbsolute || !value.toLowerCase().startsWith('https://')) {
       throw new Error('VITE_API_BASE_URL must be an absolute HTTPS URL in production.');
@@ -21,8 +22,8 @@ function resolveApiBaseUrl(rawValue: string | undefined): string {
   return value.replace(/\/+$/, '');
 }
 
-const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
-const API_SCOPE = import.meta.env.VITE_API_SCOPE || '';
+const API_BASE_URL = resolveApiBaseUrl(runtimeConfig.apiBaseUrl);
+const API_SCOPE = runtimeConfig.apiScope || '';
 
 class ApiClient {
   private client: AxiosInstance;

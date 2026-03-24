@@ -1,22 +1,41 @@
-import { PublicClientApplication, Configuration, AccountInfo } from '@azure/msal-browser';
+import { AccountInfo, Configuration, LogLevel, PublicClientApplication } from "@azure/msal-browser";
+import { runtimeConfig } from "@/config/runtime";
 
 const msalConfig: Configuration = {
   auth: {
-    clientId: import.meta.env.VITE_AZURE_CLIENT_ID || '',
-    authority: `https://login.microsoftonline.com/${import.meta.env.VITE_AZURE_TENANT_ID || 'common'}`,
-    redirectUri: window.location.origin,
+    clientId: runtimeConfig.azureClientId,
+    authority: runtimeConfig.azureAuthority,
+    redirectUri: runtimeConfig.redirectUri,
+    postLogoutRedirectUri: runtimeConfig.postLogoutUri,
+    navigateToLoginRequestUrl: true,
   },
   cache: {
-    cacheLocation: 'sessionStorage',
+    cacheLocation: "sessionStorage",
+    storeAuthStateInCookie: false,
+  },
+  system: {
+    loggerOptions: {
+      logLevel: runtimeConfig.environment === "production" ? LogLevel.Error : LogLevel.Verbose,
+      loggerCallback: (level, message, containsPii) => {
+        if (containsPii) return;
+        if (level === LogLevel.Error) {
+          console.error(message);
+        } else if (runtimeConfig.environment !== "production") {
+          console.debug(message);
+        }
+      },
+      piiLoggingEnabled: false, // MANDATORY for HIPAA compliance
+    },
   },
 };
 
 export const msalInstance = new PublicClientApplication(msalConfig);
+const apiScopes = [runtimeConfig.apiScope];
 
 export async function initializeAuth(): Promise<void> {
   await msalInstance.initialize();
   await msalInstance.handleRedirectPromise();
-  
+
   const accounts = msalInstance.getAllAccounts();
   if (accounts.length > 0) {
     msalInstance.setActiveAccount(accounts[0]);
@@ -26,12 +45,12 @@ export async function initializeAuth(): Promise<void> {
 export async function login(): Promise<void> {
   try {
     await msalInstance.loginRedirect({
-      scopes: [import.meta.env.VITE_API_SCOPE || 'User.Read'],
-    prompt: 'login',
-    loginHint: undefined,
-  });
+      scopes: apiScopes,
+      prompt: "login",
+      loginHint: undefined,
+    });
   } catch (error) {
-    console.error('Login failed:', error);
+    console.error("Login failed:", error);
     throw error;
   }
 }
@@ -41,7 +60,7 @@ export async function logout(): Promise<void> {
   if (account) {
     await msalInstance.logoutRedirect({
       account,
-      postLogoutRedirectUri: window.location.origin,
+      postLogoutRedirectUri: runtimeConfig.postLogoutUri,
     });
   }
 }
@@ -54,14 +73,14 @@ export async function getAccessToken(): Promise<string | null> {
 
   try {
     const response = await msalInstance.acquireTokenSilent({
-      scopes: [import.meta.env.VITE_API_SCOPE || 'User.Read'],
+      scopes: apiScopes,
       account,
     });
     return response.accessToken;
   } catch {
     try {
       const response = await msalInstance.acquireTokenPopup({
-        scopes: [import.meta.env.VITE_API_SCOPE || 'User.Read'],
+        scopes: apiScopes,
         account,
       });
       return response.accessToken;
@@ -79,4 +98,3 @@ export function getActiveAccount(): AccountInfo | null {
 export function isAuthenticated(): boolean {
   return msalInstance.getAllAccounts().length > 0;
 }
-
