@@ -21,6 +21,8 @@ if [[ -z "${ENVIRONMENT}" || -z "${RESOURCE_GROUP}" ]]; then
   echo "  SKIP_IMAGE_BUILD=true|false (default: false)"
   echo "  SKIP_SEARCH_BOOTSTRAP=true|false (default: false)"
   echo "  SKIP_AUTH_SETUP=true|false (default: true)"
+  echo "  CDSS_PUBMED_API_KEY=<pubmed-api-key> (optional, prod recommended)"
+  echo "  CDSS_PUBMED_EMAIL=<email@example.com> (optional, prod recommended)"
   exit 1
 fi
 
@@ -34,6 +36,7 @@ DEPLOY_SCRIPT="${SCRIPT_DIR}/deploy.sh"
 INDEX_SCRIPT="${SCRIPT_DIR}/create-search-indexes.sh"
 AUTH_SCRIPT="${SCRIPT_DIR}/setup-entra-spa-auth.sh"
 POPULATE_ENV_SCRIPT="${SCRIPT_DIR}/populate-env.sh"
+PUBMED_CONFIG_SCRIPT="${SCRIPT_DIR}/configure-pubmed-prod.sh"
 
 PROD_PUBLIC_API="${PROD_PUBLIC_API:-true}"
 SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-false}"
@@ -215,6 +218,19 @@ else
   log_info "Skipping Entra SPA auth setup (SKIP_AUTH_SETUP=${SKIP_AUTH_SETUP})"
 fi
 
+if [[ "${ENVIRONMENT}" == "prod" && -n "${APP_NAME}" && -x "${PUBMED_CONFIG_SCRIPT}" ]]; then
+  if [[ -n "${CDSS_PUBMED_API_KEY:-}" && -n "${CDSS_PUBMED_EMAIL:-}" ]]; then
+    log_info "Configuring PubMed credentials in production backend (Key Vault + secretRef)..."
+    CDSS_PUBMED_API_KEY="${CDSS_PUBMED_API_KEY}" \
+    CDSS_PUBMED_EMAIL="${CDSS_PUBMED_EMAIL}" \
+      "${PUBMED_CONFIG_SCRIPT}" "${RESOURCE_GROUP}" "${APP_NAME}" || \
+      log_warn "PubMed production configuration failed; run configure-pubmed-prod.sh manually."
+  else
+    log_warn "PubMed credentials not provided. Backend will run without CDSS_PUBMED_API_KEY/CDSS_PUBMED_EMAIL."
+    log_warn "Provide CDSS_PUBMED_API_KEY and CDSS_PUBMED_EMAIL to bootstrap-deploy.sh for auto-configuration."
+  fi
+fi
+
 API_FQDN=""
 if [[ -n "${APP_NAME}" ]]; then
   API_FQDN="$(az containerapp show -g "${RESOURCE_GROUP}" -n "${APP_NAME}" --query properties.configuration.ingress.fqdn -o tsv 2>/dev/null || true)"
@@ -224,7 +240,9 @@ log_success "Bootstrap deployment completed"
 echo ""
 echo "Next steps:"
 echo "  1) Frontend auth setup (if skipped): ./infra/scripts/setup-entra-spa-auth.sh --resource-group ${RESOURCE_GROUP} --container-app-name ${APP_NAME:-<api-app-name>}"
-echo "  2) Start frontend: cd frontend && npm install && npm run dev"
+echo "  2) (Prod recommended) Configure PubMed in backend runtime:"
+echo "     CDSS_PUBMED_API_KEY=<key> CDSS_PUBMED_EMAIL=<email> ./infra/scripts/configure-pubmed-prod.sh ${RESOURCE_GROUP} ${APP_NAME:-<api-app-name>}"
+echo "  3) Start frontend: cd frontend && npm install && npm run dev"
 if [[ -n "${API_FQDN}" ]]; then
-  echo "  3) API docs: https://${API_FQDN}/docs"
+  echo "  4) API docs: https://${API_FQDN}/docs"
 fi
