@@ -174,6 +174,7 @@ class EntraJWTAuthMiddleware(BaseHTTPMiddleware):
                 algorithms=["RS256"],
                 audience=self._audience,
                 issuer=self._issuer,
+                options={"verify_exp": True},
             )
 
             if self._required_scopes:
@@ -197,9 +198,34 @@ class EntraJWTAuthMiddleware(BaseHTTPMiddleware):
             request.state.auth_subject = claims.get("oid") or claims.get("sub")
 
         except (PyJWKClientError, InvalidTokenError) as exc:
+            # Decode token header without verification to extract diagnostic info
+            token_audience_hint = "unknown"
+            token_issuer_hint = "unknown"
+            try:
+                import base64
+                parts = token.split(".")
+                if len(parts) >= 2:
+                    # Decode payload (second part) without verification
+                    payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                    payload_json = base64.urlsafe_b64decode(payload_b64)
+                    import json
+                    payload = json.loads(payload_json)
+                    token_audience_hint = str(payload.get("aud", "missing"))
+                    token_issuer_hint = str(payload.get("iss", "missing"))
+            except Exception:
+                pass
+
             logger.warning(
                 "JWT validation failed",
-                extra={"path": path, "error": str(exc)},
+                extra={
+                    "path": path,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "expected_audience": self._audience,
+                    "expected_issuer": self._issuer,
+                    "token_audience_hint": token_audience_hint,
+                    "token_issuer_hint": token_issuer_hint,
+                },
             )
             return JSONResponse(
                 status_code=401,
@@ -208,6 +234,11 @@ class EntraJWTAuthMiddleware(BaseHTTPMiddleware):
                     "error": {
                         "type": "authentication_error",
                         "message": "Invalid or expired bearer token.",
+                        "hint": (
+                            f"Audience mismatch: token has '{token_audience_hint}', "
+                            f"backend expects '{self._audience}'. "
+                            "Check CDSS_AUTH_AUDIENCE environment variable."
+                        ) if "audience" in str(exc).lower() or token_audience_hint != self._audience else None,
                     }
                 },
             )

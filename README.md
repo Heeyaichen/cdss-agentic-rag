@@ -2,7 +2,7 @@
 
 ## 1) Initialize deployment variables
 
-```bash
+```bash 
 export ENV=prod
 export RG=cdss-prod-rg
 export LOCATION=eastus2
@@ -82,8 +82,24 @@ az containerapp show -g "$RG" -n "$APP" \
 ```
 
 ## 7) Ensure Azure AI Search indexes exist (only if bootstrap did not finish index bootstrap)
+# requires: RG is already exported
 
 ```bash
+SEARCH_NAME="${SEARCH_NAME:-$(az search service list -g "$RG" --query "[0].name" -o tsv)}"
+ORIG_PNA="$(az search service show -g "$RG" -n "$SEARCH_NAME" --query publicNetworkAccess -o tsv)"
+
+if [[ "$ORIG_PNA" != "Enabled" ]]; then
+  az search service update -g "$RG" -n "$SEARCH_NAME" --public-network-access enabled
+fi
+
+./infra/scripts/create-search-indexes.sh "$RG" "$SEARCH_NAME"
+
+if [[ "$ORIG_PNA" != "Enabled" ]]; then
+  az search service update -g "$RG" -n "$SEARCH_NAME" --public-network-access disabled
+fi
+```
+
+<!-- ```bash
 SEARCH_ADMIN_KEY=$(az search admin-key show --service-name "$SEARCH_NAME" --resource-group "$RG" --query primaryKey -o tsv)
 EXPECTED_INDEXES=("patient-records" "treatment-protocols" "medical-literature-cache")
 
@@ -130,7 +146,7 @@ else
     wait_search "Disabled"
   fi
 fi
-```
+``` -->
 
 ## 8) Generate local environment files and seed sample data
 
@@ -301,3 +317,71 @@ curl -i -X OPTIONS \
 
 az containerapp revision list -g "$RG" -n "$APP" -o table
 ```
+
+## 20) Authentication Troubleshooting
+
+If you encounter **401 Unauthorized** errors with "Invalid or expired bearer token":
+
+### Quick Diagnosis
+
+```bash
+# Check current auth configuration
+az containerapp show -g "$RG" -n "$APP" \
+  --query "properties.template.containers[0].env[?name=='CDSS_AUTH_ENABLED'||name=='CDSS_AUTH_TENANT_ID'||name=='CDSS_AUTH_AUDIENCE'||name=='CDSS_AUTH_REQUIRED_SCOPES'].[name,value]" \
+  -o table
+
+# Expected values:
+# CDSS_AUTH_ENABLED        true
+# CDSS_AUTH_TENANT_ID      <your-tenant-id>
+# CDSS_AUTH_AUDIENCE       api://cdss-api
+# CDSS_AUTH_REQUIRED_SCOPES ["access_as_user"]
+```
+
+### Root Cause: Audience Mismatch
+
+The 401 error typically occurs when `CDSS_AUTH_AUDIENCE` is empty or doesn't match the token's `aud` claim:
+
+- **Frontend requests token** with scope `api://cdss-api/access_as_user`
+- **Entra ID issues token** with `aud` = `api://cdss-api`
+- **Backend validates** against `CDSS_AUTH_AUDIENCE` value
+- **Mismatch** → JWT validation fails → 401
+
+### Quick Fix
+
+```bash
+# Update the auth configuration
+az containerapp update -g "$RG" -n "$APP" \
+  --set-env-vars \
+    "CDSS_AUTH_ENABLED=true" \
+    "CDSS_AUTH_TENANT_ID=$(az account show --query tenantId -o tsv)" \
+    "CDSS_AUTH_AUDIENCE=api://cdss-api" \
+    'CDSS_AUTH_REQUIRED_SCOPES=["access_as_user"]'
+```
+
+### Automated Fix Script
+
+```bash
+# Diagnose and fix authentication issues
+./infra/scripts/fix-auth-config.sh --resource-group "$RG" --dry-run  # Preview changes
+./infra/scripts/fix-auth-config.sh --resource-group "$RG"            # Apply fixes
+```
+
+### Verify the Fix
+
+```bash
+# Get a token with the correct scope
+export TOKEN=$(az account get-access-token --scope "api://cdss-api/access_as_user" --query accessToken -o tsv)
+
+# Test authenticated endpoint
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://${API_FQDN}/api/v1/patients?limit=1"
+```
+
+### Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| Empty `CDSS_AUTH_AUDIENCE` | Bicep default is empty | Set to `api://cdss-api` |
+| 503 Service Unavailable | Auth enabled but config incomplete | Check tenant ID and audience |
+| CORS preflight fails | Frontend origin not allowed | Add SWA hostname to CORS |
+| Token has wrong audience | API App ID URI mismatch | Verify API app registration |

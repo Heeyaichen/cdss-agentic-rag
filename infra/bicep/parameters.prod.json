@@ -52,7 +52,7 @@
     },
     "corsAllowedOrigins": {
       "value": [
-        "https://cdss-frontend.example.com"
+        "https://proud-dune-00b48820f.1.azurestaticapps.net"
       ]
     },
     "authEnabled": {
