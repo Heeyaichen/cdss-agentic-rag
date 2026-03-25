@@ -163,123 +163,116 @@ This agent acts as the final safety layer. It cross-references every cited PMID 
 ## Project Structure
 
 ```
-cdss-agentic-rag/
-├── src/cdss/
-│   ├── __init__.py
-│   ├── agents/                  # Specialized clinical agents + orchestrator
-│   │   ├── __init__.py
-│   │   ├── orchestrator.py      # Main agent coordinator
-│   │   ├── patient_history.py   # Patient record retrieval agent
-│   │   ├── medical_literature.py# PubMed search agent
-│   │   ├── protocol.py          # Treatment protocol agent
-│   │   ├── drug_safety.py       # Drug interaction checking agent
-│   │   └── guardrails.py        # Safety validation agent
-│   ├── api/                     # FastAPI REST endpoints
-│   │   ├── __init__.py
-│   │   ├── app.py               # FastAPI application factory
-│   │   ├── routes/
-│   │   │   ├── query.py         # Clinical query endpoints
-│   │   │   ├── patients.py      # Patient data endpoints
-│   │   │   ├── documents.py     # Document ingestion endpoints
-│   │   │   ├── drugs.py         # Drug interaction endpoints
-│   │   │   ├── search.py        # Literature/protocol search
-│   │   │   ├── audit.py         # Audit trail endpoints
-│   │   │   └── health.py        # Health check endpoint
-│   │   ├── middleware/
-│   │   │   ├── auth.py          # JWT/OAuth2 authentication
-│   │   │   ├── audit.py         # Request/response audit logging
-│   │   │   └── rate_limit.py    # Rate limiting middleware
-│   │   └── schemas/
-│   │       ├── requests.py      # Pydantic request models
-│   │       └── responses.py     # Pydantic response models
-│   ├── clients/                 # Azure + external API clients
-│   │   ├── __init__.py
-│   │   ├── azure_openai.py      # Azure OpenAI client wrapper
-│   │   ├── azure_search.py      # Azure AI Search client
-│   │   ├── cosmos_db.py         # Cosmos DB client
-│   │   ├── blob_storage.py      # Azure Blob Storage client
-│   │   ├── document_intel.py    # Document Intelligence client
-│   │   ├── pubmed.py            # PubMed E-utilities client
-│   │   ├── drugbank.py          # DrugBank API client
-│   │   ├── openfda.py           # OpenFDA API client
-│   │   └── rxnorm.py            # RxNorm API client
-│   ├── core/                    # Models, config, exceptions, logging
-│   │   ├── __init__.py
-│   │   ├── config.py            # Pydantic Settings configuration
-│   │   ├── models.py            # Domain models (Patient, Drug, etc.)
-│   │   ├── exceptions.py        # Custom exception hierarchy
-│   │   └── logging.py           # Structured logging setup
-│   ├── ingestion/               # Document processing pipeline
-│   │   ├── __init__.py
-│   │   ├── pipeline.py          # Ingestion orchestrator
-│   │   ├── extractors.py        # Text extraction (PDF, images)
-│   │   ├── chunker.py           # Layout-aware document chunking
-│   │   └── indexer.py           # Search index management
-│   ├── rag/                     # RAG pipeline components
-│   │   ├── __init__.py
-│   │   ├── pipeline.py          # End-to-end RAG pipeline
-│   │   ├── chunker.py           # Text chunking strategies
-│   │   ├── embedder.py          # Embedding generation
-│   │   ├── retriever.py         # Hybrid retrieval (BM25 + vector)
-│   │   ├── reranker.py          # Semantic reranking
-│   │   └── fusion.py            # Reciprocal Rank Fusion
-│   ├── services/                # Business logic services
-│   │   ├── __init__.py
-│   │   ├── query_service.py     # Clinical query processing
-│   │   ├── patient_service.py   # Patient data management
-│   │   ├── drug_service.py      # Drug interaction analysis
-│   │   └── audit_service.py     # Audit logging service
-│   └── utils/                   # Shared utilities
-│       ├── __init__.py
-│       ├── medical_codes.py     # ICD-10, LOINC, RxNorm helpers
-│       ├── text_processing.py   # Medical text normalization
-│       └── validators.py        # Input validation utilities
-├── tests/                       # Comprehensive test suite
-│   ├── conftest.py              # Shared fixtures
-│   ├── unit/
-│   │   ├── test_agents/
-│   │   ├── test_rag/
-│   │   ├── test_services/
-│   │   └── test_clients/
-│   ├── integration/
-│   │   ├── test_api/
-│   │   ├── test_ingestion/
-│   │   └── test_search/
-│   └── e2e/
-│       └── test_clinical_queries.py
-├── infra/                       # Azure Bicep IaC templates
-│   ├── main.bicep               # Root deployment template
-│   ├── modules/
-│   │   ├── ai-search.bicep
-│   │   ├── cosmos-db.bicep
-│   │   ├── openai.bicep
-│   │   ├── key-vault.bicep
-│   │   ├── app-service.bicep
-│   │   ├── sql-database.bicep
-│   │   ├── redis.bicep
-│   │   ├── storage.bicep
-│   │   └── monitoring.bicep
-│   ├── parameters/
-│   │   ├── dev.bicepparam
-│   │   ├── staging.bicepparam
-│   │   └── prod.bicepparam
-│   └── scripts/
-│       ├── deploy.sh
-│       └── seed-data.sh
-├── sample_data/                 # Sample patient data for testing
-│   ├── sample_patient.json
-│   ├── sample_query.json
-│   ├── sample_response.json
-│   ├── sample_protocol.md
-│   └── sample_lab_report.txt
-├── docs/                        # Additional documentation
-│   ├── architecture.md
-│   └── api-reference.md
-├── .env.example                 # Environment variable template
-├── Dockerfile                   # Multi-stage Docker build
-├── docker-compose.yml           # Local development stack
-├── pyproject.toml               # Python project configuration
-└── README.md                    # This file
+cdss-agentic-rag-main/                  # Repository root
+├── src/                                # Backend source root
+│   └── cdss/                           # Main Python package
+│       ├── __init__.py                 # Package initializer
+│       ├── agents/                     # Multi-agent orchestration layer
+│       │   ├── base.py                 # Shared agent interface/base behavior
+│       │   ├── orchestrator.py         # Coordinates specialist agent execution
+│       │   ├── patient_history.py      # Patient context retrieval agent
+│       │   ├── medical_literature.py   # PubMed + evidence retrieval agent
+│       │   ├── protocol_agent.py       # Guideline/protocol reasoning agent
+│       │   ├── drug_safety.py          # Interaction/safety analysis agent
+│       │   └── guardrails.py           # Clinical safety/hallucination checks
+│       ├── api/                        # FastAPI transport layer
+│       │   ├── app.py                  # App factory, middleware wiring, lifespan
+│       │   ├── routes.py               # All API endpoints (query, docs, search, etc.)
+│       │   └── middleware.py           # Auth, rate limits, request tracing logic
+│       ├── clients/                    # External/infra service adapters
+│       │   ├── openai_client.py        # Azure OpenAI chat/embedding access
+│       │   ├── search_client.py        # Azure AI Search retrieval operations
+│       │   ├── cosmos_client.py        # Cosmos DB reads/writes + status persistence
+│       │   ├── blob_storage_client.py  # Azure Blob read/write utilities
+│       │   ├── document_intelligence_client.py # OCR/form extraction client
+│       │   ├── keyvault_client.py      # Key Vault secret resolution helper
+│       │   ├── pubmed_client.py        # NCBI PubMed E-utilities integration
+│       │   ├── drugbank_client.py      # DrugBank integration adapter
+│       │   ├── openfda_client.py       # OpenFDA integration adapter
+│       │   └── rxnorm_client.py        # RxNorm normalization/lookup client
+│       ├── core/                       # Shared app foundations
+│       │   ├── config.py               # Pydantic settings and env binding
+│       │   ├── models.py               # Domain DTOs and response models
+│       │   ├── exceptions.py           # Typed exception hierarchy
+│       │   └── logging.py              # Structured logging configuration
+│       ├── ingestion/                  # Document ingestion pipeline package
+│       │   └── pipeline.py             # Parse/chunk/index ingestion workflow
+│       ├── rag/                        # Retrieval-augmented generation utilities
+│       │   ├── chunker.py              # Clinical-aware text chunking
+│       │   ├── embedder.py             # Embedding generation wrapper
+│       │   ├── retriever.py            # Hybrid retrieval strategy
+│       │   └── fusion.py               # Result fusion/ranking logic
+│       ├── services/                   # Business service orchestrations
+│       │   ├── query_service.py        # Main clinical query application service
+│       │   └── ingestion_service.py    # Document ingestion service facade
+│       ├── tools/                      # Operational utility scripts/modules
+│       │   └── seed_sample_data.py     # In-network sample data bootstrap module
+│       └── utils/                      # Shared utility helpers
+├── frontend/                           # Production React + Vite SPA
+│   ├── src/                            # Frontend source code
+│   │   ├── components/                 # Reusable UI components
+│   │   ├── pages/                      # Route/page-level containers
+│   │   ├── hooks/                      # Custom React hooks
+│   │   ├── stores/                     # Client state management stores
+│   │   ├── styles/                     # Global and module styles
+│   │   ├── theme/                      # Theme tokens/system configuration
+│   │   └── mocks/                      # Mock handlers and local fixtures
+│   ├── public/                         # Static public assets
+│   │   └── mockServiceWorker.js        # MSW runtime worker asset
+│   ├── docs/                           # Frontend-specific design/docs
+│   ├── stories/                        # Storybook stories
+│   ├── tests/visual/                   # UI visual regression/e2e tests
+│   ├── package.json                    # Frontend scripts and dependencies
+│   ├── playwright.config.ts            # Playwright test configuration
+│   └── staticwebapp.config.json        # Azure Static Web Apps routing/auth config
+├── tests/                              # Backend Python test suite
+│   ├── conftest.py                     # Shared pytest fixtures
+│   ├── unit/                           # Fast unit tests
+│   │   ├── test_agents.py              # Agent-level unit coverage
+│   │   ├── test_api.py                 # API behavior unit tests
+│   │   ├── test_chunker.py             # Chunking logic tests
+│   │   ├── test_clients.py             # Service client contract tests
+│   │   ├── test_ingestion.py           # Ingestion service/pipeline tests
+│   │   ├── test_models.py              # Core model validation tests
+│   │   ├── test_orchestrator.py        # Orchestrator flow tests
+│   │   ├── test_query_service.py       # Query service integration-style units
+│   │   └── test_rag_pipeline.py        # RAG pipeline behavior tests
+│   └── integration/                    # Cross-component integration tests
+│       └── test_e2e.py                 # End-to-end backend integration checks
+├── infra/                              # Infrastructure-as-code and operations
+│   ├── bicep/                          # Azure deployment templates/params
+│   │   ├── main.bicep                 # Canonical IaC template
+│   │   ├── main.json                  # Compiled Bicep JSON artifact
+│   │   ├── parameters.dev.json        # Dev environment parameters
+│   │   ├── parameters.staging.json    # Staging environment parameters
+│   │   └── parameters.prod.json       # Production environment parameters
+│   └── scripts/                        # Deployment/bootstrap helper scripts
+│       ├── bootstrap-deploy.sh         # End-to-end first-run bootstrap flow
+│       ├── deploy.sh                   # Core infra + app deployment script
+│       ├── setup-entra-spa-auth.sh     # Entra SPA/API app registration alignment
+│       ├── fix-auth-config.sh          # Auth audience mismatch diagnosis/fix
+│       ├── configure-pubmed-prod.sh    # PubMed Key Vault + runtime secret wiring
+│       ├── create-search-indexes.sh    # Idempotent Azure AI Search index setup
+│       ├── seed-data-infra-network.sh  # In-network data seeding execution
+│       ├── seed-data.sh                # Legacy/local seeding script
+│       ├── seed_data.py                # Python seed payload logic
+│       └── populate-env.sh             # Generate env files from deployed resources
+├── sample_data/                        # Sample datasets for UI/API validation
+│   ├── sample_patient.json             # Example patient record payload
+│   ├── sample_query.json               # Example clinical query payload
+│   ├── sample_response.json            # Example response payload
+│   ├── sample_protocol.md              # Example treatment protocol content
+│   └── sample_lab_report.txt           # Example uploaded lab report document
+├── docs/                               # Project architecture/API docs
+│   ├── architecture.md                 # System design documentation
+│   └── api-reference.md                # API endpoint reference
+├── .env.example                        # Root environment template
+├── Dockerfile                          # Backend container build recipe
+├── docker-compose.yml                  # Local multi-service compose stack
+├── pyproject.toml                      # Python project metadata/dependencies
+├── compact.md                          # Production API/system validation runbook
+├── guide.md                            # Production UI-only validation runbook
+└── README.md                           # Primary project documentation
 ```
 
 ---
@@ -296,14 +289,14 @@ cdss-agentic-rag/
 
 ## Quick Start
 
-### 1. Clone the repository
+## 1). Clone the repository
 
 ```bash
 git clone https://github.com/your-org/cdss-agentic-rag.git
 cd cdss-agentic-rag
 ```
 
-## 1) Initialize deployment variables
+## 2) Initialize deployment variables
 
 ```bash 
 export ENV=prod
@@ -315,7 +308,7 @@ export API_APP_DISPLAY_NAME=cdss-api
 export SCOPE_NAME=access_as_user
 ```
 
-## 2) Verify prerequisites and Azure context
+## 3) Verify prerequisites and Azure context
 
 ```bash
 command -v az
@@ -328,7 +321,7 @@ az login
 az account show -o table
 ```
 
-## 3) Set PubMed credentials (used in step 10)
+## 4) Set PubMed credentials (used in step 10)
 
 ```bash
 # Option A: enter values interactively
@@ -344,7 +337,7 @@ export CDSS_PUBMED_API_KEY CDSS_PUBMED_EMAIL
 test -n "$CDSS_PUBMED_API_KEY" && test -n "$CDSS_PUBMED_EMAIL" && echo "PubMed vars loaded: $CDSS_PUBMED_EMAIL"
 ```
 
-## 4) Deploy backend infrastructure and backend application
+## 5) Deploy backend infrastructure and backend application
 
 ```bash
 # Run bootstrap first. PubMed Key Vault secret wiring is done in step 10
@@ -355,7 +348,7 @@ env -u CDSS_PUBMED_API_KEY -u CDSS_PUBMED_EMAIL \
 
 `bootstrap-deploy.sh` now performs idempotent Search bootstrap checks and skips costly Search public network toggles when index bootstrap is already complete.
 
-## 5) Resolve deployed resource names
+## 6) Resolve deployed resource names
 
 ```bash
 export APP=$(az containerapp list -g "$RG" --query "[?contains(name,'-api')].name | [0]" -o tsv)
@@ -370,12 +363,12 @@ printf "APP=%s\nAPI_FQDN=%s\nSEARCH_NAME=%s\nOPENAI_NAME=%s\nDOCINTEL_NAME=%s\nK
   "$APP" "$API_FQDN" "$SEARCH_NAME" "$OPENAI_NAME" "$DOCINTEL_NAME" "$KV_NAME"
 ```
 
-## 5.1) Optional fallback for Key Vault RBAC failures
+## 6.1) Optional fallback for Key Vault RBAC failures
 
 `configure-pubmed-prod.sh` now attempts automatic caller role assignment (`Key Vault Secrets Officer`) and retries secret writes.  
 Use manual RBAC commands only if your account cannot create role assignments (missing Owner/User Access Administrator permissions).
 
-## 6) Validate backend readiness
+## 7) Validate backend readiness
 
 ```bash
 curl -i "https://${API_FQDN}/api/v1/health"
@@ -394,7 +387,7 @@ az containerapp show -g "$RG" -n "$APP" \
   -o table
 ```
 
-## 7) Optional recovery: ensure Azure AI Search indexes exist (only if step 4 failed before Search bootstrap completed)
+## 8) Optional recovery: ensure Azure AI Search indexes exist (only if step 4 failed before Search bootstrap completed)
 # requires: RG is already exported
 
 ```bash
@@ -461,14 +454,14 @@ else
 fi
 ``` -->
 
-## 8) Generate local environment files and seed sample data
+## 9) Generate local environment files and seed sample data
 
 ```bash
 ./infra/scripts/populate-env.sh "$RG"
 ./infra/scripts/seed-data-infra-network.sh "$RG" "$APP"
 ```
 
-## 9) Configure Entra SPA/API auth and backend audience alignment
+## 10) Configure Entra SPA/API auth and backend audience alignment
 
 ```bash
 ./infra/scripts/setup-entra-spa-auth.sh \
@@ -480,7 +473,7 @@ fi
 
 `setup-entra-spa-auth.sh` aligns `CDSS_AUTH_AUDIENCE` to the API app **client ID** (JWT `aud`) and keeps frontend token scope on the API identifier URI.
 
-## 10) Configure PubMed credentials in deployed backend runtime
+## 11) Configure PubMed credentials in deployed backend runtime
 
 ```bash
 # If not already set in this shell:
@@ -502,7 +495,7 @@ az containerapp show -g "$RG" -n "$APP" \
 
 `configure-pubmed-prod.sh` now handles Key Vault `ForbiddenByConnection` automatically (temporary caller-IP allowlist with automatic rollback), so no manual Key Vault network commands are required.
 
-## 11) Ensure Static Web App exists and fetch deployment values
+## 12) Ensure Static Web App exists and fetch deployment values
 
 ```bash
 az staticwebapp show --name "$SWA_NAME" --resource-group "$RG" >/dev/null 2>&1 || \
@@ -513,7 +506,7 @@ export SWA_TOKEN=$(az staticwebapp secrets list --name "$SWA_NAME" --resource-gr
 echo "$SWA_HOST"
 ```
 
-## 12) Set production-only redirect URIs for the SPA app
+## 13) Set production-only redirect URIs for the SPA app
 
 ```bash
 export SPA_CLIENT_ID=$(az ad app list --display-name "$SPA_APP_DISPLAY_NAME" --query "[0].appId" -o tsv)
@@ -525,14 +518,14 @@ az rest --method PATCH \
   --body "{\"spa\":{\"redirectUris\":[\"https://${SWA_HOST}\",\"https://${SWA_HOST}/auth/callback\"]}}"
 ```
 
-## 13) Configure backend CORS for the production frontend origin
+## 14) Configure backend CORS for the production frontend origin
 
 ```bash
 az containerapp ingress cors update -g "$RG" -n "$APP" \
   --allowed-origins "https://${SWA_HOST}"
 ```
 
-## 14) Create frontend production environment file
+## 15) Create frontend production environment file
 
 ```bash
 export TENANT_ID=$(az account show --query tenantId -o tsv)
@@ -561,7 +554,7 @@ VITE_ENVIRONMENT=production
 EOF
 ```
 
-## 15) Build and deploy frontend to Azure Static Web Apps
+## 16) Build and deploy frontend to Azure Static Web Apps
 
 ```bash
 cd frontend
@@ -573,7 +566,7 @@ npx @azure/static-web-apps-cli deploy ./dist --deployment-token "$SWA_TOKEN" --e
 cd ..
 ```
 
-## 16) Validate authentication and backend APIs with bearer token
+## 17) Validate authentication and backend APIs with bearer token
 
 ```bash
 export TOKEN=$(az account get-access-token --scope "$API_SCOPE" --query accessToken -o tsv)
@@ -589,7 +582,7 @@ curl -i -N \
   "https://${API_FQDN}/api/v1/query/stream"
 ```
 
-## 17) Validate document ingestion and retrieval APIs
+## 18) Validate document ingestion and retrieval APIs
 
 ```bash
 export DOC_ID=$(curl -s -X POST \
@@ -610,7 +603,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
   "https://${API_FQDN}/api/v1/search/protocols" | jq
 ```
 
-## 18) Validate production frontend end-to-end in browser
+## 19) Validate production frontend end-to-end in browser
 
 ```bash
 curl -I "https://${SWA_HOST}"
@@ -625,7 +618,7 @@ echo "https://${SWA_HOST}"
 6. Upload a document and verify completion.
 7. Run literature and protocol searches.
 
-## 19) Final production checks
+## 20) Final production checks
 
 ```bash
 az containerapp show -g "$RG" -n "$APP" \
@@ -643,7 +636,7 @@ curl -i -X OPTIONS \
 az containerapp revision list -g "$RG" -n "$APP" -o table
 ```
 
-## 20) Authentication Troubleshooting
+## 21) Authentication Troubleshooting
 
 If you encounter **401 Unauthorized** errors with "Invalid or expired bearer token":
 
