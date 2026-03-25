@@ -25,7 +25,7 @@ az login
 az account show -o table
 ```
 
-## 3) Set PubMed credentials (before first deploy)
+## 3) Set PubMed credentials (used in step 10)
 
 ```bash
 # Option A: enter values interactively
@@ -44,10 +44,13 @@ test -n "$CDSS_PUBMED_API_KEY" && test -n "$CDSS_PUBMED_EMAIL" && echo "PubMed v
 ## 4) Deploy backend infrastructure and backend application
 
 ```bash
-CDSS_PUBMED_API_KEY="$CDSS_PUBMED_API_KEY" \
-CDSS_PUBMED_EMAIL="$CDSS_PUBMED_EMAIL" \
-./infra/scripts/bootstrap-deploy.sh "$ENV" "$RG" "$LOCATION"
+# Run bootstrap first. PubMed Key Vault secret wiring is done in step 10
+# after RBAC preflight so this runbook succeeds cleanly end-to-end.
+env -u CDSS_PUBMED_API_KEY -u CDSS_PUBMED_EMAIL \
+  ./infra/scripts/bootstrap-deploy.sh "$ENV" "$RG" "$LOCATION"
 ```
+
+`bootstrap-deploy.sh` now performs idempotent Search bootstrap checks and skips costly Search public network toggles when index bootstrap is already complete.
 
 ## 5) Resolve deployed resource names
 
@@ -57,10 +60,17 @@ export API_FQDN=$(az containerapp show -g "$RG" -n "$APP" --query properties.con
 export SEARCH_NAME=$(az search service list -g "$RG" --query "[0].name" -o tsv)
 export OPENAI_NAME=$(az cognitiveservices account list -g "$RG" --query "[?kind=='OpenAI'].name | [0]" -o tsv)
 export DOCINTEL_NAME=$(az cognitiveservices account list -g "$RG" --query "[?kind=='FormRecognizer'].name | [0]" -o tsv)
+export KV_NAME=$(az keyvault list -g "$RG" --query "[0].name" -o tsv)
+export KV_ID=$(az keyvault show -g "$RG" -n "$KV_NAME" --query id -o tsv)
 
-printf "APP=%s\nAPI_FQDN=%s\nSEARCH_NAME=%s\nOPENAI_NAME=%s\nDOCINTEL_NAME=%s\n" \
-  "$APP" "$API_FQDN" "$SEARCH_NAME" "$OPENAI_NAME" "$DOCINTEL_NAME"
+printf "APP=%s\nAPI_FQDN=%s\nSEARCH_NAME=%s\nOPENAI_NAME=%s\nDOCINTEL_NAME=%s\nKV_NAME=%s\n" \
+  "$APP" "$API_FQDN" "$SEARCH_NAME" "$OPENAI_NAME" "$DOCINTEL_NAME" "$KV_NAME"
 ```
+
+## 5.1) Optional fallback for Key Vault RBAC failures
+
+`configure-pubmed-prod.sh` now attempts automatic caller role assignment (`Key Vault Secrets Officer`) and retries secret writes.  
+Use manual RBAC commands only if your account cannot create role assignments (missing Owner/User Access Administrator permissions).
 
 ## 6) Validate backend readiness
 
@@ -81,7 +91,7 @@ az containerapp show -g "$RG" -n "$APP" \
   -o table
 ```
 
-## 7) Ensure Azure AI Search indexes exist (only if bootstrap did not finish index bootstrap)
+## 7) Optional recovery: ensure Azure AI Search indexes exist (only if step 4 failed before Search bootstrap completed)
 # requires: RG is already exported
 
 ```bash
@@ -165,19 +175,29 @@ fi
   --api-app-display-name "$API_APP_DISPLAY_NAME"
 ```
 
-## 10) Configure PubMed credentials in deployed backend runtime (fallback/manual rerun)
+`setup-entra-spa-auth.sh` aligns `CDSS_AUTH_AUDIENCE` to the API app **client ID** (JWT `aud`) and keeps frontend token scope on the API identifier URI.
+
+## 10) Configure PubMed credentials in deployed backend runtime
 
 ```bash
+# If not already set in this shell:
 # read -r -s -p "PubMed API key: " CDSS_PUBMED_API_KEY; echo
 # read -r -p "PubMed contact email: " CDSS_PUBMED_EMAIL
 # export CDSS_PUBMED_API_KEY CDSS_PUBMED_EMAIL
 
-# ./infra/scripts/configure-pubmed-prod.sh "$RG" "$APP"
+test -n "$CDSS_PUBMED_API_KEY" && test -n "$CDSS_PUBMED_EMAIL" && echo "PubMed vars loaded: $CDSS_PUBMED_EMAIL"
+
+./infra/scripts/configure-pubmed-prod.sh "$RG" "$APP" "$KV_NAME"
+
+# Optional: disable temporary Key Vault IP allowlist fallback if your runner already has private-link access.
+# CDSS_KV_TEMP_IP_ALLOWLIST=false ./infra/scripts/configure-pubmed-prod.sh "$RG" "$APP" "$KV_NAME"
 
 az containerapp show -g "$RG" -n "$APP" \
   --query "properties.template.containers[0].env[?name=='CDSS_PUBMED_API_KEY'||name=='CDSS_PUBMED_EMAIL'||name=='CDSS_PUBMED_BASE_URL'].{name:name,secretRef:secretRef,value:value}" \
   -o table
 ```
+
+`configure-pubmed-prod.sh` now handles Key Vault `ForbiddenByConnection` automatically (temporary caller-IP allowlist with automatic rollback), so no manual Key Vault network commands are required.
 
 ## 11) Ensure Static Web App exists and fetch deployment values
 
@@ -213,8 +233,10 @@ az containerapp ingress cors update -g "$RG" -n "$APP" \
 
 ```bash
 export TENANT_ID=$(az account show --query tenantId -o tsv)
+export API_CLIENT_ID="${API_CLIENT_ID:-$(az ad app list --display-name "$API_APP_DISPLAY_NAME" --query "[0].appId" -o tsv)}"
+export API_IDENTIFIER_URI=$(az ad app show --id "$API_CLIENT_ID" --query "identifierUris[0]" -o tsv)
 export API_AUDIENCE=$(az containerapp show -g "$RG" -n "$APP" --query "properties.template.containers[0].env[?name=='CDSS_AUTH_AUDIENCE'].value | [0]" -o tsv)
-export API_SCOPE="${API_AUDIENCE}/${SCOPE_NAME}"
+export API_SCOPE="${API_IDENTIFIER_URI}/${SCOPE_NAME}"
 export WEBPUBSUB_NAME=$(az resource list -g "$RG" --resource-type "Microsoft.SignalRService/webPubSub" --query "[0].name" -o tsv)
 if [[ -n "$WEBPUBSUB_NAME" ]]; then
   export VITE_WS_ENDPOINT_VALUE="wss://${WEBPUBSUB_NAME}.webpubsub.azure.com"
@@ -333,7 +355,7 @@ az containerapp show -g "$RG" -n "$APP" \
 # Expected values:
 # CDSS_AUTH_ENABLED        true
 # CDSS_AUTH_TENANT_ID      <your-tenant-id>
-# CDSS_AUTH_AUDIENCE       api://cdss-api
+# CDSS_AUTH_AUDIENCE       <API app client ID GUID>
 # CDSS_AUTH_REQUIRED_SCOPES ["access_as_user"]
 ```
 
@@ -342,19 +364,21 @@ az containerapp show -g "$RG" -n "$APP" \
 The 401 error typically occurs when `CDSS_AUTH_AUDIENCE` is empty or doesn't match the token's `aud` claim:
 
 - **Frontend requests token** with scope `api://cdss-api/access_as_user`
-- **Entra ID issues token** with `aud` = `api://cdss-api`
+- **Entra ID issues token** with `aud` = `<API app client ID GUID>`
 - **Backend validates** against `CDSS_AUTH_AUDIENCE` value
 - **Mismatch** → JWT validation fails → 401
 
 ### Quick Fix
 
 ```bash
+export API_CLIENT_ID=$(az ad app list --display-name "$API_APP_DISPLAY_NAME" --query "[0].appId" -o tsv)
+
 # Update the auth configuration
 az containerapp update -g "$RG" -n "$APP" \
   --set-env-vars \
     "CDSS_AUTH_ENABLED=true" \
     "CDSS_AUTH_TENANT_ID=$(az account show --query tenantId -o tsv)" \
-    "CDSS_AUTH_AUDIENCE=api://cdss-api" \
+    "CDSS_AUTH_AUDIENCE=${API_CLIENT_ID}" \
     'CDSS_AUTH_REQUIRED_SCOPES=["access_as_user"]'
 ```
 
@@ -369,8 +393,11 @@ az containerapp update -g "$RG" -n "$APP" \
 ### Verify the Fix
 
 ```bash
-# Get a token with the correct scope
-export TOKEN=$(az account get-access-token --scope "api://cdss-api/access_as_user" --query accessToken -o tsv)
+export API_CLIENT_ID=$(az ad app list --display-name "$API_APP_DISPLAY_NAME" --query "[0].appId" -o tsv)
+export API_IDENTIFIER_URI=$(az ad app show --id "$API_CLIENT_ID" --query "identifierUris[0]" -o tsv)
+
+# Get a token with the correct API identifier URI scope
+export TOKEN=$(az account get-access-token --scope "${API_IDENTIFIER_URI}/access_as_user" --query accessToken -o tsv)
 
 # Test authenticated endpoint
 curl -H "Authorization: Bearer $TOKEN" \
@@ -381,7 +408,8 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| Empty `CDSS_AUTH_AUDIENCE` | Bicep default is empty | Set to `api://cdss-api` |
+| Empty `CDSS_AUTH_AUDIENCE` | Bicep default is empty | Set to API app client ID (GUID) |
 | 503 Service Unavailable | Auth enabled but config incomplete | Check tenant ID and audience |
 | CORS preflight fails | Frontend origin not allowed | Add SWA hostname to CORS |
-| Token has wrong audience | API App ID URI mismatch | Verify API app registration |
+| Token has wrong audience | Backend uses API identifier URI instead of app client ID | Set `CDSS_AUTH_AUDIENCE` to API app client ID |
+| PubMed configure fails with `ForbiddenByRbac` | Deployer cannot write Key Vault secrets and cannot self-assign role | Grant `Key Vault Secrets Officer` on the vault to the deployer, then rerun step 10 |
