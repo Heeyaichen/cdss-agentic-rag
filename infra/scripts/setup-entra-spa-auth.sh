@@ -288,8 +288,12 @@ if [[ "${API_APP_ID_URI_EXPLICIT}" != "true" ]]; then
     if [[ -n "${RESOURCE_GROUP}" && -n "${CONTAINER_APP_NAME}" ]]; then
         BACKEND_AUTH_AUDIENCE="$(get_container_app_env_value "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}" "CDSS_AUTH_AUDIENCE")"
         if [[ -n "${BACKEND_AUTH_AUDIENCE}" && "${BACKEND_AUTH_AUDIENCE}" != "None" ]]; then
-            API_APP_ID_URI="${BACKEND_AUTH_AUDIENCE}"
-            log_info "Using backend CDSS_AUTH_AUDIENCE as API identifier URI default: ${API_APP_ID_URI}"
+            if [[ "${BACKEND_AUTH_AUDIENCE}" == api://* ]]; then
+                API_APP_ID_URI="${BACKEND_AUTH_AUDIENCE}"
+                log_info "Using backend CDSS_AUTH_AUDIENCE as API identifier URI default: ${API_APP_ID_URI}"
+            else
+                log_info "Backend CDSS_AUTH_AUDIENCE is not an identifier URI (${BACKEND_AUTH_AUDIENCE}); keeping default API URI: ${API_APP_ID_URI}"
+            fi
         else
             log_info "Backend CDSS_AUTH_AUDIENCE is empty; using script default: ${API_APP_ID_URI}"
         fi
@@ -522,7 +526,8 @@ build_api_base_url() {
 CONTAINER_APP_NAME="$(resolve_container_app_name "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}")"
 
 if [[ -n "${RESOURCE_GROUP}" && -n "${CONTAINER_APP_NAME}" ]]; then
-    sync_backend_auth_audience "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}" "${API_APP_ID_URI}"
+    # Entra access tokens for custom APIs carry the API app client ID in aud.
+    sync_backend_auth_audience "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}" "${API_APP_ID}"
 fi
 
 if [[ "${SKIP_FRONTEND_ENV}" != "true" ]]; then
@@ -565,5 +570,5 @@ if [[ -n "${API_FQDN}" ]]; then
 fi
 echo ""
 echo "Current API auth settings should align to:"
-echo "  CDSS_AUTH_AUDIENCE=${API_APP_ID_URI}"
+echo "  CDSS_AUTH_AUDIENCE=${API_APP_ID}"
 echo "  CDSS_AUTH_REQUIRED_SCOPES=[\"${SCOPE_NAME}\"]"

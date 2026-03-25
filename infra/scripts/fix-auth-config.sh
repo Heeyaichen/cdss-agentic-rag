@@ -18,16 +18,57 @@ DRY_RUN="false"
 RESOURCE_GROUP=""
 CONTAINER_APP_NAME=""
 
-# Expected values based on frontend .env.production
-EXPECTED_API_SCOPE="api://cdss-api/access_as_user"
-EXPECTED_AUTH_AUDIENCE="api://cdss-api"
+# Expected auth metadata (resolved dynamically from Entra app registration when possible)
+DEFAULT_API_APP_DISPLAY_NAME="cdss-api"
+DEFAULT_API_IDENTIFIER_URI="api://cdss-api"
 EXPECTED_SCOPE_NAME="access_as_user"
+EXPECTED_API_RESOURCE_URI="${DEFAULT_API_IDENTIFIER_URI}"
+EXPECTED_API_SCOPE=""
+EXPECTED_AUTH_AUDIENCE=""
 
 log_info() { echo "[INFO] $1"; }
 log_warn() { echo "[WARN] $1"; }
 log_error() { echo "[ERROR] $1"; }
 log_success() { echo "[SUCCESS] $1"; }
 log_diff() { echo "  $1"; }
+
+find_api_app_by_identifier_uri() {
+    local identifier_uri="$1"
+
+    az rest \
+        --method GET \
+        --uri "https://graph.microsoft.com/v1.0/applications?\$filter=identifierUris/any(x:x eq '${identifier_uri}')&\$select=id,appId,displayName" \
+        --query "value[0].appId" \
+        -o tsv 2>/dev/null || true
+}
+
+resolve_expected_auth_values() {
+    local resolved_app_id=""
+    local resolved_identifier_uri=""
+
+    resolved_app_id="$(find_api_app_by_identifier_uri "${DEFAULT_API_IDENTIFIER_URI}")"
+    if [[ -z "${resolved_app_id}" || "${resolved_app_id}" == "None" ]]; then
+        resolved_app_id="$(az ad app list \
+            --display-name "${DEFAULT_API_APP_DISPLAY_NAME}" \
+            --query "[0].appId" \
+            -o tsv 2>/dev/null || true)"
+    fi
+
+    if [[ -n "${resolved_app_id}" && "${resolved_app_id}" != "None" ]]; then
+        resolved_identifier_uri="$(az ad app show \
+            --id "${resolved_app_id}" \
+            --query "identifierUris[0]" \
+            -o tsv 2>/dev/null || true)"
+        if [[ -n "${resolved_identifier_uri}" && "${resolved_identifier_uri}" != "None" ]]; then
+            EXPECTED_API_RESOURCE_URI="${resolved_identifier_uri}"
+        fi
+        EXPECTED_AUTH_AUDIENCE="${resolved_app_id}"
+    else
+        EXPECTED_AUTH_AUDIENCE="${DEFAULT_API_IDENTIFIER_URI}"
+    fi
+
+    EXPECTED_API_SCOPE="${EXPECTED_API_RESOURCE_URI}/${EXPECTED_SCOPE_NAME}"
+}
 
 usage() {
     cat <<EOF
@@ -98,8 +139,11 @@ if [[ -z "${CONTAINER_APP_NAME}" ]]; then
     exit 1
 fi
 
+resolve_expected_auth_values
+
 log_info "Resource Group: ${RESOURCE_GROUP}"
 log_info "Container App: ${CONTAINER_APP_NAME}"
+log_info "Expected API Scope: ${EXPECTED_API_SCOPE}"
 log_info "Expected Auth Audience: ${EXPECTED_AUTH_AUDIENCE}"
 echo ""
 
@@ -142,6 +186,13 @@ CURRENT_API_FQDN="$(az containerapp show \
     --name "${CONTAINER_APP_NAME}" \
     --query "properties.configuration.ingress.fqdn" \
     -o tsv 2>/dev/null || true)"
+
+# If Graph lookup is restricted and backend already has a non-empty audience,
+# prefer preserving the current value over forcing a potentially wrong fallback.
+if [[ "${EXPECTED_AUTH_AUDIENCE}" == "${DEFAULT_API_IDENTIFIER_URI}" && -n "${CURRENT_AUTH_AUDIENCE}" && "${CURRENT_AUTH_AUDIENCE}" != "None" ]]; then
+    log_warn "Could not resolve API app ID from Graph; using current CDSS_AUTH_AUDIENCE as expected value: ${CURRENT_AUTH_AUDIENCE}"
+    EXPECTED_AUTH_AUDIENCE="${CURRENT_AUTH_AUDIENCE}"
+fi
 
 # Get subscription tenant ID
 SUBSCRIPTION_TENANT_ID="$(az account show --query tenantId -o tsv 2>/dev/null || true)"
@@ -205,7 +256,7 @@ if [[ ${#ISSUES[@]} -eq 0 ]]; then
     echo ""
     log_info "If you're still experiencing 401 errors, check:"
     echo "  1. Frontend VITE_API_SCOPE matches: ${EXPECTED_API_SCOPE}"
-    echo "  2. API App Registration has identifierUris: ${EXPECTED_AUTH_AUDIENCE}"
+    echo "  2. API App Registration has identifierUris: ${EXPECTED_API_RESOURCE_URI}"
     echo "  3. API App Registration has scope: ${EXPECTED_SCOPE_NAME}"
     echo "  4. SPA App Registration has delegated permission to API scope"
     exit 0
@@ -249,7 +300,7 @@ if [[ -z "${CURRENT_AUTH_AUDIENCE}" || "${CURRENT_AUTH_AUDIENCE}" == "None" || "
 fi
 
 if [[ -z "${CURRENT_AUTH_SCOPES}" || "${CURRENT_AUTH_SCOPES}" == "None" || "${CURRENT_AUTH_SCOPES}" == "[]" ]]; then
-    ENV_VARS+=("CDSS_AUTH_REQUIRED_SCOPES=[\"access_as_user\"]")
+    ENV_VARS+=("CDSS_AUTH_REQUIRED_SCOPES=[\"${EXPECTED_SCOPE_NAME}\"]")
 fi
 
 # Apply environment variable fixes

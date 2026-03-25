@@ -10,6 +10,17 @@
 
 set -euo pipefail
 
+REQUIRED_INDEXES=(
+  "patient-records"
+  "treatment-protocols"
+  "medical-literature-cache"
+)
+
+if [[ "${1:-}" == "--list-required-indexes" ]]; then
+  printf "%s\n" "${REQUIRED_INDEXES[@]}"
+  exit 0
+fi
+
 RESOURCE_GROUP="${1:-}"
 SEARCH_SERVICE_NAME="${2:-}"
 API_VERSION="2024-05-01-preview"

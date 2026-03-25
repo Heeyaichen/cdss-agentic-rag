@@ -23,6 +23,7 @@ if [[ -z "${ENVIRONMENT}" || -z "${RESOURCE_GROUP}" ]]; then
   echo "  SKIP_AUTH_SETUP=true|false (default: true)"
   echo "  CDSS_PUBMED_API_KEY=<pubmed-api-key> (optional, prod recommended)"
   echo "  CDSS_PUBMED_EMAIL=<email@example.com> (optional, prod recommended)"
+  echo "  CDSS_KV_TEMP_IP_ALLOWLIST=true|false (default: true)"
   exit 1
 fi
 
@@ -45,11 +46,16 @@ SKIP_AUTH_SETUP="${SKIP_AUTH_SETUP:-true}"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y.%m.%d.%H%M%S)}"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-}"
 ACR_NAME="${ACR_NAME:-}"
+SEARCH_INDEXES_API_VERSION="2024-05-01-preview"
+SEARCH_BOOTSTRAP_TAG_KEY="cdssSearchIndexBootstrapFingerprint"
+SEARCH_INDEX_BOOTSTRAP_FINGERPRINT="${SEARCH_INDEX_BOOTSTRAP_FINGERPRINT:-}"
+REQUIRED_SEARCH_INDEXES=()
 
 log_info() { echo "[INFO] $1"; }
 log_warn() { echo "[WARN] $1"; }
 log_error() { echo "[ERROR] $1"; }
 log_success() { echo "[SUCCESS] $1"; }
+log_stage() { echo ""; echo "[INFO] ===== $1 ====="; }
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -84,6 +90,193 @@ wait_for_search_state() {
     log_info "Waiting for Search service update (state=${state}, pna=${pna})..."
     sleep 15
   done
+}
+
+compute_index_bootstrap_fingerprint() {
+  local file_path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum "${file_path}" | awk '{print substr($1,1,12)}'
+  elif command -v sha1sum >/dev/null 2>&1; then
+    sha1sum "${file_path}" | awk '{print substr($1,1,12)}'
+  else
+    cksum "${file_path}" | awk '{print $1}'
+  fi
+}
+
+load_required_search_indexes() {
+  REQUIRED_SEARCH_INDEXES=()
+  while IFS= read -r index_name; do
+    if [[ -n "${index_name}" ]]; then
+      REQUIRED_SEARCH_INDEXES+=("${index_name}")
+    fi
+  done < <("${INDEX_SCRIPT}" --list-required-indexes 2>/dev/null || true)
+
+  if [[ "${#REQUIRED_SEARCH_INDEXES[@]}" -eq 0 ]]; then
+    REQUIRED_SEARCH_INDEXES=("patient-records" "treatment-protocols" "medical-literature-cache")
+  fi
+}
+
+initialize_search_index_metadata() {
+  if [[ -z "${SEARCH_INDEX_BOOTSTRAP_FINGERPRINT}" ]]; then
+    SEARCH_INDEX_BOOTSTRAP_FINGERPRINT="$(compute_index_bootstrap_fingerprint "${INDEX_SCRIPT}")"
+  fi
+  load_required_search_indexes
+}
+
+get_search_bootstrap_marker() {
+  local rg="$1"
+  local search_name="$2"
+  az search service show \
+    --resource-group "${rg}" \
+    --name "${search_name}" \
+    --query "tags.${SEARCH_BOOTSTRAP_TAG_KEY}" \
+    -o tsv 2>/dev/null || true
+}
+
+set_search_bootstrap_marker() {
+  local rg="$1"
+  local search_name="$2"
+  local search_id=""
+  local timestamp=""
+  search_id="$(az search service show --resource-group "${rg}" --name "${search_name}" --query id -o tsv 2>/dev/null || true)"
+  if [[ -z "${search_id}" ]]; then
+    log_warn "Unable to resolve Search resource ID for bootstrap marker tag."
+    return 1
+  fi
+
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  az resource tag \
+    --ids "${search_id}" \
+    --is-incremental \
+    --tags \
+      "${SEARCH_BOOTSTRAP_TAG_KEY}=${SEARCH_INDEX_BOOTSTRAP_FINGERPRINT}" \
+      "cdssSearchIndexBootstrapAt=${timestamp}" \
+    --only-show-errors \
+    --output none
+}
+
+get_search_indexes_tsv() {
+  local rg="$1"
+  local search_name="$2"
+  local admin_key=""
+  admin_key="$(az search admin-key show --service-name "${search_name}" --resource-group "${rg}" --query primaryKey -o tsv 2>/dev/null || true)"
+  if [[ -z "${admin_key}" ]]; then
+    log_error "Failed to resolve Search admin key for service '${search_name}'."
+    return 1
+  fi
+
+  AZURE_CORE_ONLY_SHOW_ERRORS=1 az rest \
+    --method get \
+    --url "https://${search_name}.search.windows.net/indexes?api-version=${SEARCH_INDEXES_API_VERSION}" \
+    --skip-authorization-header \
+    --headers "api-key=${admin_key}" \
+    --query "value[].name" \
+    -o tsv
+}
+
+check_required_search_indexes() {
+  local rg="$1"
+  local search_name="$2"
+  local current_indexes=""
+  local missing=()
+  local index_name=""
+
+  if ! current_indexes="$(get_search_indexes_tsv "${rg}" "${search_name}" 2>&1)"; then
+    if [[ "${current_indexes}" == *"publicNetworkAccess: Disabled"* || "${current_indexes}" == *"source is not allowed by applicable rules"* || "${current_indexes}" == *"not from a trusted service"* ]]; then
+      return 42
+    fi
+    echo "${current_indexes}" >&2
+    return 1
+  fi
+
+  for index_name in "${REQUIRED_SEARCH_INDEXES[@]}"; do
+    if ! grep -qx "${index_name}" <<<"${current_indexes}"; then
+      missing+=("${index_name}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  log_info "Missing Search indexes: ${missing[*]}"
+  return 10
+}
+
+ensure_search_indexes_bootstrapped() {
+  local rg="$1"
+  local search_name="$2"
+  local original_pna=""
+  local restore_pna_arg=""
+  local need_restore="false"
+  local status=0
+  local check_rc=0
+  local bootstrap_marker=""
+
+  initialize_search_index_metadata
+
+  bootstrap_marker="$(get_search_bootstrap_marker "${rg}" "${search_name}")"
+  if [[ "${bootstrap_marker}" == "${SEARCH_INDEX_BOOTSTRAP_FINGERPRINT}" ]]; then
+    log_info "Search index bootstrap already marked current (${SEARCH_INDEX_BOOTSTRAP_FINGERPRINT}); skipping."
+    return 0
+  fi
+
+  original_pna="$(az search service show -g "${rg}" -n "${search_name}" --query publicNetworkAccess -o tsv 2>/dev/null || echo "Disabled")"
+  if [[ -z "${original_pna}" || "${original_pna}" == "null" ]]; then
+    original_pna="Disabled"
+  fi
+  restore_pna_arg="$(echo "${original_pna}" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "${original_pna}" != "Enabled" ]]; then
+    log_warn "Temporarily enabling Search public network access for index pre-check/bootstrap"
+    if ! az search service update -g "${rg}" -n "${search_name}" --public-network-access enabled --output none; then
+      return 1
+    fi
+    if ! wait_for_search_state "${rg}" "${search_name}" "Enabled"; then
+      return 1
+    fi
+    need_restore="true"
+  fi
+
+  if check_required_search_indexes "${rg}" "${search_name}"; then
+    log_info "All required Search indexes already exist. Skipping index creation."
+  else
+    check_rc=$?
+    if [[ "${check_rc}" -eq 10 ]]; then
+      log_info "Creating/updating Search indexes"
+      if ! "${INDEX_SCRIPT}" "${rg}" "${search_name}"; then
+        status=$?
+      fi
+    else
+      log_error "Search index pre-check failed."
+      status="${check_rc}"
+    fi
+  fi
+
+  if [[ "${status}" -eq 0 ]]; then
+    if check_required_search_indexes "${rg}" "${search_name}"; then
+      if set_search_bootstrap_marker "${rg}" "${search_name}"; then
+        log_info "Search bootstrap marker set (${SEARCH_BOOTSTRAP_TAG_KEY}=${SEARCH_INDEX_BOOTSTRAP_FINGERPRINT})."
+      else
+        log_warn "Could not persist Search bootstrap marker tag; future runs may re-check."
+      fi
+    else
+      log_error "Search index verification failed after bootstrap."
+      status=1
+    fi
+  fi
+
+  if [[ "${need_restore}" == "true" ]]; then
+    log_info "Restoring Search public network access to ${restore_pna_arg}"
+    if ! az search service update -g "${rg}" -n "${search_name}" --public-network-access "${restore_pna_arg}" --output none; then
+      log_error "Failed to restore Search public network access."
+      status=1
+    elif ! wait_for_search_state "${rg}" "${search_name}" "${original_pna}"; then
+      status=1
+    fi
+  fi
+
+  return "${status}"
 }
 
 create_or_resolve_acr_name() {
@@ -135,6 +328,7 @@ log_info "Subscription: ${SUBSCRIPTION_NAME} (${SUBSCRIPTION_ID})"
 log_info "Ensuring resource group exists: ${RESOURCE_GROUP}"
 az group create -n "${RESOURCE_GROUP}" -l "${LOCATION}" --output none
 
+log_stage "Container Image"
 if [[ -z "${CONTAINER_IMAGE}" ]]; then
   ACR_NAME="$(create_or_resolve_acr_name "${RESOURCE_GROUP}")"
 
@@ -171,31 +365,19 @@ else
   log_info "Using pre-supplied container image: ${CONTAINER_IMAGE}"
 fi
 
+log_stage "Infrastructure Deploy"
 log_info "Deploying infrastructure and app via deploy.sh"
 CONTAINER_IMAGE="${CONTAINER_IMAGE}" \
 ACR_NAME="${ACR_NAME}" \
 "${DEPLOY_SCRIPT}" "${ENVIRONMENT}" "${RESOURCE_GROUP}" "${LOCATION}" "${PROD_PUBLIC_API}"
 
 if [[ "${SKIP_SEARCH_BOOTSTRAP}" != "true" ]]; then
+  log_stage "Search Bootstrap"
   SEARCH_NAME="$(az search service list -g "${RESOURCE_GROUP}" --query "[0].name" -o tsv 2>/dev/null || true)"
   if [[ -n "${SEARCH_NAME}" ]]; then
-    ORIGINAL_PNA="$(az search service show -g "${RESOURCE_GROUP}" -n "${SEARCH_NAME}" --query publicNetworkAccess -o tsv 2>/dev/null || echo "disabled")"
-    NEED_DISABLE="false"
-
-    if [[ "${ORIGINAL_PNA}" != "Enabled" ]]; then
-      log_warn "Temporarily enabling Search public network access for index bootstrap"
-      az search service update -g "${RESOURCE_GROUP}" -n "${SEARCH_NAME}" --public-network-access enabled --output none
-      wait_for_search_state "${RESOURCE_GROUP}" "${SEARCH_NAME}" "Enabled"
-      NEED_DISABLE="true"
-    fi
-
-    log_info "Creating/updating Search indexes"
-    "${INDEX_SCRIPT}" "${RESOURCE_GROUP}" "${SEARCH_NAME}"
-
-    if [[ "${NEED_DISABLE}" == "true" ]]; then
-      log_info "Restoring Search public network access to disabled"
-      az search service update -g "${RESOURCE_GROUP}" -n "${SEARCH_NAME}" --public-network-access disabled --output none
-      wait_for_search_state "${RESOURCE_GROUP}" "${SEARCH_NAME}" "Disabled"
+    if ! ensure_search_indexes_bootstrapped "${RESOURCE_GROUP}" "${SEARCH_NAME}"; then
+      log_error "Search bootstrap stage failed."
+      exit 1
     fi
   else
     log_warn "No Search service found; skipping index bootstrap"
@@ -205,12 +387,14 @@ else
 fi
 
 if [[ -x "${POPULATE_ENV_SCRIPT}" ]]; then
+  log_stage "Environment Materialization"
   log_info "Generating local env files from Azure resources"
   "${POPULATE_ENV_SCRIPT}" "${RESOURCE_GROUP}" || log_warn "populate-env.sh failed; continue manually if needed."
 fi
 
 APP_NAME="$(az containerapp list -g "${RESOURCE_GROUP}" --query "[?contains(name,'-api')].name | [0]" -o tsv 2>/dev/null || true)"
 if [[ "${SKIP_AUTH_SETUP}" != "true" && -n "${APP_NAME}" ]]; then
+  log_stage "Entra Auth Setup"
   log_info "Running Entra SPA auth setup"
   "${AUTH_SCRIPT}" --resource-group "${RESOURCE_GROUP}" --container-app-name "${APP_NAME}" || \
     log_warn "setup-entra-spa-auth.sh failed; run it manually if tenant permissions are restricted."
@@ -220,6 +404,7 @@ fi
 
 if [[ "${ENVIRONMENT}" == "prod" && -n "${APP_NAME}" && -x "${PUBMED_CONFIG_SCRIPT}" ]]; then
   if [[ -n "${CDSS_PUBMED_API_KEY:-}" && -n "${CDSS_PUBMED_EMAIL:-}" ]]; then
+    log_stage "PubMed Configuration"
     log_info "Configuring PubMed credentials in production backend (Key Vault + secretRef)..."
     CDSS_PUBMED_API_KEY="${CDSS_PUBMED_API_KEY}" \
     CDSS_PUBMED_EMAIL="${CDSS_PUBMED_EMAIL}" \
