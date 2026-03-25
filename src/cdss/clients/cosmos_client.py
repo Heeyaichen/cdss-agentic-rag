@@ -660,3 +660,105 @@ class CosmosDBClient:
                 error=str(exc),
             )
             raise AzureServiceError(f"Failed to retrieve agent state for session '{session_id}': {exc}") from exc
+
+    # -------------------------------------------------------------------------
+    # Ingestion Status (durable, multi-replica safe)
+    # -------------------------------------------------------------------------
+
+    async def upsert_ingestion_status(
+        self,
+        document_id: str,
+        status: dict[str, Any],
+        partition_key: str = "ingestion_status",
+        doc_type: str = "ingestion_status",
+    ) -> dict:
+        """Create or update ingestion status for a document.
+
+        Stores status records in the agent-state container under a shared
+        partition to support consistent reads across multiple API replicas.
+
+        Args:
+            document_id: Ingestion document identifier.
+            status: Status payload to persist.
+            partition_key: Cosmos partition key value.
+            doc_type: Optional discriminator for filtering/debugging.
+
+        Returns:
+            The persisted status record.
+
+        Raises:
+            AzureServiceError: If the upsert operation fails.
+        """
+        container = self._get_container(CONTAINER_AGENT_STATE)
+
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            record = dict(status)
+            record["id"] = document_id
+            record["session_id"] = partition_key
+            record["document_id"] = document_id
+            record["doc_type"] = doc_type
+            record["updated_at"] = record.get("updated_at", now)
+            record["created_at"] = record.get("created_at", now)
+
+            result = container.upsert_item(body=record)
+            logger.debug(
+                "Ingestion status upserted",
+                document_id=document_id,
+                partition_key=partition_key,
+            )
+            return dict(result)
+
+        except Exception as exc:
+            logger.error(
+                "Failed to upsert ingestion status",
+                document_id=document_id,
+                partition_key=partition_key,
+                error=str(exc),
+            )
+            raise AzureServiceError(f"Failed to upsert ingestion status for '{document_id}': {exc}") from exc
+
+    async def get_ingestion_status(
+        self,
+        document_id: str,
+        partition_key: str = "ingestion_status",
+    ) -> dict | None:
+        """Retrieve ingestion status for a document.
+
+        Args:
+            document_id: Ingestion document identifier.
+            partition_key: Cosmos partition key value.
+
+        Returns:
+            Persisted ingestion status dictionary, or None if not found.
+
+        Raises:
+            AzureServiceError: If the read operation fails unexpectedly.
+        """
+        container = self._get_container(CONTAINER_AGENT_STATE)
+
+        try:
+            item = container.read_item(item=document_id, partition_key=partition_key)
+            logger.debug(
+                "Ingestion status retrieved",
+                document_id=document_id,
+                partition_key=partition_key,
+            )
+            return dict(item)
+
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            logger.debug(
+                "Ingestion status not found",
+                document_id=document_id,
+                partition_key=partition_key,
+            )
+            return None
+
+        except Exception as exc:
+            logger.error(
+                "Failed to get ingestion status",
+                document_id=document_id,
+                partition_key=partition_key,
+                error=str(exc),
+            )
+            raise AzureServiceError(f"Failed to retrieve ingestion status for '{document_id}': {exc}") from exc

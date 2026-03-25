@@ -608,9 +608,93 @@ async def submit_feedback(
 # Document Ingestion Endpoints
 # ==========================================================================
 
-# In-memory store for tracking ingestion status. In production this would
-# be backed by Cosmos DB or a task queue (e.g. Azure Service Bus).
+# Process-local fallback store for ingestion status. Primary persistence for
+# production runs is Cosmos DB via ClinicalQueryService.cosmos_client.
 _ingestion_status: dict[str, dict] = {}
+_INGESTION_STATUS_PARTITION_KEY = "ingestion_status"
+_INGESTION_STATUS_DOC_TYPE = "ingestion_status"
+
+
+def _resolve_ingestion_status_client(query_service: ClinicalQueryService) -> object | None:
+    cosmos_client = getattr(query_service, "cosmos_client", None)
+    if cosmos_client is None:
+        return None
+    if not hasattr(cosmos_client, "upsert_ingestion_status"):
+        return None
+    if not hasattr(cosmos_client, "get_ingestion_status"):
+        return None
+    return cosmos_client
+
+
+async def _persist_ingestion_status(
+    query_service: ClinicalQueryService,
+    document_id: str,
+    status_payload: dict,
+) -> None:
+    _ingestion_status[document_id] = status_payload
+
+    cosmos_client = _resolve_ingestion_status_client(query_service)
+    if cosmos_client is None:
+        return
+
+    try:
+        await cosmos_client.upsert_ingestion_status(
+            document_id=document_id,
+            status=status_payload,
+            partition_key=_INGESTION_STATUS_PARTITION_KEY,
+            doc_type=_INGESTION_STATUS_DOC_TYPE,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist ingestion status to Cosmos DB; using in-memory fallback",
+            extra={
+                "document_id": document_id,
+                "error": str(exc),
+            },
+        )
+
+
+async def _update_ingestion_status(
+    query_service: ClinicalQueryService,
+    document_id: str,
+    **updates: object,
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    current = dict(_ingestion_status.get(document_id, {"document_id": document_id}))
+    current.update(updates)
+    current["document_id"] = document_id
+    current["updated_at"] = str(updates.get("updated_at", now))
+    if not current.get("created_at"):
+        current["created_at"] = now
+
+    await _persist_ingestion_status(query_service, document_id, current)
+    return current
+
+
+async def _get_ingestion_status_record(
+    query_service: ClinicalQueryService,
+    document_id: str,
+) -> dict | None:
+    cosmos_client = _resolve_ingestion_status_client(query_service)
+    if cosmos_client is not None:
+        try:
+            persisted = await cosmos_client.get_ingestion_status(
+                document_id=document_id,
+                partition_key=_INGESTION_STATUS_PARTITION_KEY,
+            )
+            if persisted is not None:
+                _ingestion_status[document_id] = persisted
+                return persisted
+        except Exception as exc:
+            logger.warning(
+                "Failed to read ingestion status from Cosmos DB; using in-memory fallback",
+                extra={
+                    "document_id": document_id,
+                    "error": str(exc),
+                },
+            )
+
+    return _ingestion_status.get(document_id)
 
 
 @router.post(
@@ -717,20 +801,24 @@ async def ingest_document(
             detail=f"Failed to read uploaded file: {exc}",
         ) from exc
 
-    # Initialize ingestion status
-    _ingestion_status[document_id] = {
-        "document_id": document_id,
-        "filename": file.filename,
-        "document_type": document_type,
-        "normalized_document_type": normalized_document_type,
-        "patient_id": patient_id,
-        "metadata": metadata_payload or {},
-        "status": "pending",
-        "progress": 0,
-        "created_at": now,
-        "updated_at": now,
-        "error": None,
-    }
+    # Initialize ingestion status (durable in Cosmos DB, in-memory fallback)
+    await _persist_ingestion_status(
+        service,
+        document_id,
+        {
+            "document_id": document_id,
+            "filename": file.filename,
+            "document_type": document_type,
+            "normalized_document_type": normalized_document_type,
+            "patient_id": patient_id,
+            "metadata": metadata_payload or {},
+            "status": "pending",
+            "progress": 0,
+            "created_at": now,
+            "updated_at": now,
+            "error": None,
+        },
+    )
 
     # Schedule background processing
     if background_tasks is not None:
@@ -762,7 +850,9 @@ async def ingest_document(
         metadata=metadata_payload,
     )
 
-    final_status = _ingestion_status[document_id]
+    final_status = await _get_ingestion_status_record(service, document_id) or {
+        "status": "unknown"
+    }
     return {
         "document_id": document_id,
         "status": final_status["status"],
@@ -793,9 +883,12 @@ async def _process_document_background(
         patient_id: Optional associated patient ID.
     """
     try:
-        _ingestion_status[document_id]["status"] = "processing"
-        _ingestion_status[document_id]["progress"] = 10
-        _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await _update_ingestion_status(
+            query_service,
+            document_id,
+            status="processing",
+            progress=10,
+        )
 
         ingestion_service = query_service.ingestion_service
 
@@ -821,18 +914,22 @@ async def _process_document_background(
             )
 
         result_status = str(result.get("status", "completed"))
-        _ingestion_status[document_id]["status"] = result_status
-        _ingestion_status[document_id]["progress"] = 100
-        _ingestion_status[document_id]["pipeline_document_id"] = result.get("document_id")
-        _ingestion_status[document_id]["message"] = str(result.get("message", "Document processing completed."))
-        _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
-        _ingestion_status[document_id]["details"] = result
+        await _update_ingestion_status(
+            query_service,
+            document_id,
+            status=result_status,
+            progress=100,
+            pipeline_document_id=result.get("document_id"),
+            message=str(result.get("message", "Document processing completed.")),
+            details=result,
+            error=None,
+        )
 
         logger.info(
             "Document processing completed",
             extra={
                 "document_id": document_id,
-                "filename": filename,
+                "source_filename": filename,
                 "document_type": document_type,
                 "metadata_keys": sorted((metadata or {}).keys()),
                 "pipeline_document_id": result.get("document_id"),
@@ -840,9 +937,13 @@ async def _process_document_background(
         )
 
     except Exception as exc:
-        _ingestion_status[document_id]["status"] = "failed"
-        _ingestion_status[document_id]["error"] = str(exc)
-        _ingestion_status[document_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await _update_ingestion_status(
+            query_service,
+            document_id,
+            status="failed",
+            progress=100,
+            error=str(exc),
+        )
 
         logger.error(
             "Document processing failed",
@@ -855,7 +956,10 @@ async def _process_document_background(
     tags=["Documents"],
     summary="Check document ingestion status",
 )
-async def get_ingestion_status(document_id: str) -> dict:
+async def get_ingestion_status(
+    document_id: str,
+    service: ClinicalQueryService = Depends(get_query_service),
+) -> dict:
     """Check the status of a document ingestion job.
 
     Args:
@@ -864,7 +968,7 @@ async def get_ingestion_status(document_id: str) -> dict:
     Returns:
         A dictionary with status, progress percentage, and any errors.
     """
-    status = _ingestion_status.get(document_id)
+    status = await _get_ingestion_status_record(service, document_id)
     if status is None:
         raise HTTPException(
             status_code=404,
