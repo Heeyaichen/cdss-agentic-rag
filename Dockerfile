@@ -66,6 +66,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy application source code
 COPY src/ /app/src/
+COPY sample_data/ /app/sample_data/
 
 WORKDIR /app
 

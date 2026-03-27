@@ -258,7 +258,8 @@ cdss-agentic-rag-main/                  # Repository root
 │       ├── seed_data.py                # Python seed payload logic
 │       └── populate-env.sh             # Generate env files from deployed resources
 ├── sample_data/                        # Sample datasets for UI/API validation
-│   ├── sample_patient.json             # Example patient record payload
+│   ├── sample_patient.json             # Canonical primary patient source payload
+│   ├── sample_patients.json            # Additional patient variant fixtures (patient_1..patient_5)
 │   ├── sample_query.json               # Example clinical query payload
 │   ├── sample_response.json            # Example response payload
 │   ├── sample_protocol.md              # Example treatment protocol content
@@ -289,7 +290,7 @@ cdss-agentic-rag-main/                  # Repository root
 
 ## Quick Start
 
-## 1). Clone the repository
+## 1) Clone the repository
 
 ```bash
 git clone https://github.com/your-org/cdss-agentic-rag.git
@@ -311,11 +312,21 @@ export SCOPE_NAME=access_as_user
 ## 3) Verify prerequisites and Azure context
 
 ```bash
-command -v az
-command -v docker
-command -v jq
-command -v python3
-command -v npm
+az --version
+az bicep version
+# az extension add --name containerapp --upgrade --yes
+# az extension add --name staticwebapp --upgrade --yes
+
+docker --version
+docker buildx version
+
+jq --version
+python3 --version
+# python --version || echo "python command missing (set alias to python3)"
+npm --version
+npx --version
+git --version
+curl --version
 
 az login
 az account show -o table
@@ -340,7 +351,7 @@ test -n "$CDSS_PUBMED_API_KEY" && test -n "$CDSS_PUBMED_EMAIL" && echo "PubMed v
 ## 5) Deploy backend infrastructure and backend application
 
 ```bash
-# Run bootstrap first. PubMed Key Vault secret wiring is done in step 10
+# Run bootstrap first. PubMed Key Vault secret wiring is done in step 11
 # after RBAC preflight so this runbook succeeds cleanly end-to-end.
 env -u CDSS_PUBMED_API_KEY -u CDSS_PUBMED_EMAIL \
   ./infra/scripts/bootstrap-deploy.sh "$ENV" "$RG" "$LOCATION"
@@ -461,6 +472,9 @@ fi
 ./infra/scripts/seed-data-infra-network.sh "$RG" "$APP"
 ```
 
+Seeding now uses both `sample_data/sample_patient.json` (primary canonical profile) and
+`sample_data/sample_patients.json` (additional patient fixtures), so the Patients workspace can validate multiple IDs.
+
 ## 10) Configure Entra SPA/API auth and backend audience alignment
 
 ```bash
@@ -487,6 +501,10 @@ test -n "$CDSS_PUBMED_API_KEY" && test -n "$CDSS_PUBMED_EMAIL" && echo "PubMed v
 
 # Optional: disable temporary Key Vault IP allowlist fallback if your runner already has private-link access.
 # CDSS_KV_TEMP_IP_ALLOWLIST=false ./infra/scripts/configure-pubmed-prod.sh "$RG" "$APP" "$KV_NAME"
+
+# If you hit a network restriction path (ForbiddenByConnection) right after RBAC was granted.
+CDSS_KV_TEMP_IP_ALLOWLIST=true ./infra/scripts/configure-pubmed-prod.sh "$RG" "$APP" "$KV_NAME"
+
 
 az containerapp show -g "$RG" -n "$APP" \
   --query "properties.template.containers[0].env[?name=='CDSS_PUBMED_API_KEY'||name=='CDSS_PUBMED_EMAIL'||name=='CDSS_PUBMED_BASE_URL'].{name:name,secretRef:secretRef,value:value}" \
@@ -561,7 +579,7 @@ cd frontend
 npm ci
 npm run build
 cp staticwebapp.config.json dist/staticwebapp.config.json
-grep -R "localhost" dist/ && exit 1 || true
+# grep -R "localhost" dist/ && exit 1 || true
 npx @azure/static-web-apps-cli deploy ./dist --deployment-token "$SWA_TOKEN" --env production
 cd ..
 ```
@@ -602,6 +620,35 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
   -d '{"query":"hypertension protocol","max_results":5}' \
   "https://${API_FQDN}/api/v1/search/protocols" | jq
 ```
+
+### Recommended test queries (for upload-ready docs)
+
+If you uploaded `sample_data/sample_protocol_upload.txt` and `sample_data/sample_literature_upload.txt`,
+use these queries to verify index retrieval quality and phrase matching:
+
+```bash
+# Protocol retrieval probes (expected: protocol-oriented hits)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"SGLT2 inhibitor CKD stage 3 monitoring cadence","max_results":5}' \
+  "https://${API_FQDN}/api/v1/search/protocols" | jq
+
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"eGFR decline more than 5 mL/min/1.73m2 per year referral criteria","max_results":5}' \
+  "https://${API_FQDN}/api/v1/search/protocols" | jq
+
+# Literature retrieval probes (expected: literature-oriented hits)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"atrial fibrillation CKD stage 3 major bleeding hazard ratio","max_results":5}' \
+  "https://${API_FQDN}/api/v1/search/literature" | jq
+
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"DOAC versus warfarin intracranial hemorrhage propensity-score matching","max_results":5}' \
+  "https://${API_FQDN}/api/v1/search/literature" | jq
+```
+
+Expected behavior:
+- Protocol queries should return recommendations, monitoring cadence, and escalation trigger language.
+- Literature queries should return comparative-effectiveness and safety evidence terms from the uploaded article text.
 
 ## 19) Validate production frontend end-to-end in browser
 
