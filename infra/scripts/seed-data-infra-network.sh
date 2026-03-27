@@ -153,14 +153,43 @@ log_info "Using revision: ${ACTIVE_REVISION}"
 REMOTE_COMMAND="python -m cdss.tools.seed_sample_data"
 log_info "Executing in-network seeding module inside Container App..."
 
-if ! az containerapp exec \
-    --resource-group "${RESOURCE_GROUP}" \
-    --name "${CONTAINER_APP_NAME}" \
-    --revision "${ACTIVE_REVISION}" \
-    --command "${REMOTE_COMMAND}"; then
+EXEC_LOG="$(mktemp)"
+MAX_EXEC_RETRIES=3
+EXEC_SUCCESS="false"
+
+for ATTEMPT in $(seq 1 "${MAX_EXEC_RETRIES}"); do
+    log_info "Exec attempt ${ATTEMPT}/${MAX_EXEC_RETRIES}..."
+
+    if az containerapp exec \
+        --resource-group "${RESOURCE_GROUP}" \
+        --name "${CONTAINER_APP_NAME}" \
+        --revision "${ACTIVE_REVISION}" \
+        --command "${REMOTE_COMMAND}" 2>&1 | tee "${EXEC_LOG}"; then
+        if grep -q "\[ERROR\] In-network seed failed:" "${EXEC_LOG}"; then
+            log_warn "In-network seed reported an application error."
+        elif grep -q "ClusterExecFailure" "${EXEC_LOG}" || grep -q "websocket: close 1011" "${EXEC_LOG}"; then
+            log_warn "Container exec encountered a transient platform error."
+        else
+            EXEC_SUCCESS="true"
+            break
+        fi
+    else
+        log_warn "az containerapp exec command failed on attempt ${ATTEMPT}."
+    fi
+
+    if [[ "${ATTEMPT}" -lt "${MAX_EXEC_RETRIES}" ]]; then
+        log_info "Retrying in 10s..."
+        sleep 10
+    fi
+done
+
+if [[ "${EXEC_SUCCESS}" != "true" ]]; then
     log_error "In-network seed command failed."
-    log_error "Ensure the backend image includes 'cdss.tools.seed_sample_data' and redeploy if needed."
+    log_error "Ensure the backend image includes sample_data and 'cdss.tools.seed_sample_data', then retry."
+    rm -f "${EXEC_LOG}" || true
     exit 1
 fi
+
+rm -f "${EXEC_LOG}" || true
 
 log_info "Done."
