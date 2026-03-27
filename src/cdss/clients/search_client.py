@@ -91,6 +91,12 @@ class AzureSearchClient:
             )
         return client
 
+    def resolve_index_name(self, index_name: str) -> str:
+        """Resolve logical or physical index identifier to physical index name."""
+        if index_name in self._index_name_map:
+            return self._index_name_map[index_name]
+        return index_name
+
     async def hybrid_search(
         self,
         index_name: str,
@@ -197,6 +203,152 @@ class AzureSearchClient:
             )
             raise RetrieverError(
                 f"Hybrid search failed on index '{index_name}': {exc}"
+            ) from exc
+
+    async def search_document_chunks(
+        self,
+        index_name: str,
+        document_id: str,
+        search_text: str = "*",
+        top: int = 5,
+    ) -> list[dict]:
+        """Search chunks for a specific ingested document ID.
+
+        Uses a strict ``document_id`` filter and supports either wildcard
+        (index proof) or phrase search (retrieval proof).
+        """
+        client = self._get_client(index_name)
+        escaped_document_id = document_id.replace("'", "''")
+        safe_search_text = search_text.strip() or "*"
+
+        try:
+            results = client.search(
+                search_text=safe_search_text,
+                query_type="simple",
+                search_mode="all",
+                filter=f"document_id eq '{escaped_document_id}'",
+                top=top,
+                include_total_count=True,
+            )
+
+            search_results: list[dict] = []
+            for result in results:
+                search_results.append(
+                    {
+                        "id": result.get("id", ""),
+                        "score": result.get("@search.score", 0.0),
+                        "document_id": result.get("document_id", ""),
+                        "chunk_index": result.get("chunk_index"),
+                        "content": result.get("content", ""),
+                        "document_type": result.get("document_type", ""),
+                        "patient_id": result.get("patient_id"),
+                        "pmid": result.get("pmid"),
+                        "title": result.get("title"),
+                        "guideline_name": result.get("guideline_name"),
+                        "specialty": result.get("specialty"),
+                    }
+                )
+
+            logger.info(
+                "Document chunk search completed",
+                index=index_name,
+                document_id=document_id,
+                search_text=safe_search_text,
+                results_count=len(search_results),
+            )
+            return search_results
+        except Exception as exc:
+            logger.error(
+                "Document chunk search failed",
+                index=index_name,
+                document_id=document_id,
+                search_text=safe_search_text,
+                error=str(exc),
+            )
+            raise RetrieverError(
+                f"Document chunk search failed on index '{index_name}': {exc}"
+            ) from exc
+
+    async def delete_document_chunks(
+        self,
+        index_name: str,
+        document_id: str,
+        batch_size: int = 1000,
+        max_batches: int = 50,
+    ) -> dict[str, Any]:
+        """Delete all chunks for a specific ingested document ID.
+
+        Deletes in batches to handle large documents safely.
+
+        Returns:
+            Dictionary with delete summary metadata.
+        """
+        client = self._get_client(index_name)
+        escaped_document_id = document_id.replace("'", "''")
+        total_deleted = 0
+        total_failed = 0
+        batches_processed = 0
+
+        try:
+            while batches_processed < max_batches:
+                search_results = client.search(
+                    search_text="*",
+                    query_type="simple",
+                    search_mode="all",
+                    filter=f"document_id eq '{escaped_document_id}'",
+                    top=batch_size,
+                    select=["id"],
+                )
+
+                ids_to_delete = [
+                    result.get("id", "")
+                    for result in search_results
+                    if result.get("id")
+                ]
+
+                if not ids_to_delete:
+                    break
+
+                delete_results = client.delete_documents(
+                    documents=[{"id": doc_id} for doc_id in ids_to_delete]
+                )
+                batch_deleted = sum(1 for result in delete_results if result.succeeded)
+                batch_failed = sum(1 for result in delete_results if not result.succeeded)
+
+                total_deleted += batch_deleted
+                total_failed += batch_failed
+                batches_processed += 1
+
+                logger.info(
+                    "Document chunk delete batch completed",
+                    index=index_name,
+                    document_id=document_id,
+                    batch_size=len(ids_to_delete),
+                    deleted=batch_deleted,
+                    failed=batch_failed,
+                )
+
+                # If fewer than batch_size were found, we've likely exhausted all hits.
+                if len(ids_to_delete) < batch_size:
+                    break
+
+            return {
+                "document_id": document_id,
+                "index_name": index_name,
+                "deleted_count": total_deleted,
+                "failed_count": total_failed,
+                "batches_processed": batches_processed,
+            }
+
+        except Exception as exc:
+            logger.error(
+                "Document chunk deletion failed",
+                index=index_name,
+                document_id=document_id,
+                error=str(exc),
+            )
+            raise RetrieverError(
+                f"Document chunk deletion failed on index '{index_name}': {exc}"
             ) from exc
 
     async def search_patient_records(

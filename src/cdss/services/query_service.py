@@ -285,9 +285,10 @@ class ClinicalQueryService:
         start_idx = (page - 1) * limit
         end_idx = start_idx + limit
         paged_profiles = profiles[start_idx:end_idx]
+        normalized_profiles = [self._normalize_patient_profile(profile) for profile in paged_profiles]
 
         return {
-            "patients": paged_profiles,
+            "patients": normalized_profiles,
             "page": page,
             "page_size": limit,
             "limit": limit,
@@ -419,6 +420,7 @@ class ClinicalQueryService:
         profile = await self.cosmos_client.get_patient_profile(patient_id)
 
         if profile is not None:
+            profile = self._normalize_patient_profile(profile)
             logger.info(
                 "Patient profile retrieved",
                 extra={"patient_id": patient_id},
@@ -430,6 +432,279 @@ class ClinicalQueryService:
             )
 
         return profile
+
+    @staticmethod
+    def _normalize_patient_profile(profile: dict[str, Any]) -> dict[str, Any]:
+        """Normalize legacy patient document variants to the canonical API shape."""
+        if not isinstance(profile, dict):
+            return profile
+
+        def _normalize_demographics(data: dict[str, Any]) -> dict[str, Any]:
+            demographics = data.get("demographics")
+            demographics = demographics if isinstance(demographics, dict) else {}
+
+            vital_signs = data.get("vital_signs")
+            vital_signs = vital_signs if isinstance(vital_signs, dict) else {}
+
+            weight_kg = demographics.get("weight_kg")
+            if weight_kg is None:
+                weight_obj = vital_signs.get("weight")
+                if isinstance(weight_obj, dict):
+                    weight_kg = weight_obj.get("value")
+
+            height_cm = demographics.get("height_cm")
+            if height_cm is None:
+                height_obj = vital_signs.get("height")
+                if isinstance(height_obj, dict):
+                    height_cm = height_obj.get("value")
+
+            return {
+                "age": demographics.get("age", 0),
+                "sex": demographics.get("sex", "unknown"),
+                "weight_kg": weight_kg if weight_kg is not None else 0,
+                "height_cm": height_cm if height_cm is not None else 0,
+                "blood_type": demographics.get("blood_type"),
+            }
+
+        def _normalize_conditions(data: dict[str, Any]) -> list[dict[str, Any]]:
+            canonical = data.get("active_conditions")
+            if isinstance(canonical, list):
+                return [c for c in canonical if isinstance(c, dict)]
+
+            legacy = data.get("conditions")
+            if not isinstance(legacy, list):
+                return []
+
+            normalized: list[dict[str, Any]] = []
+            for condition in legacy:
+                if isinstance(condition, str):
+                    normalized.append(
+                        {
+                            "code": "unknown",
+                            "coding_system": "ICD-10",
+                            "display": condition,
+                            "onset_date": None,
+                            "status": "active",
+                        }
+                    )
+                    continue
+                if not isinstance(condition, dict):
+                    continue
+                icd_code = condition.get("icd10_code")
+                snomed_code = condition.get("snomed_ct_code")
+                code = condition.get("code") or icd_code or snomed_code or "unknown"
+                coding_system = "ICD-10" if icd_code else "SNOMED-CT"
+                normalized.append(
+                    {
+                        "code": code,
+                        "coding_system": condition.get("coding_system", coding_system),
+                        "display": condition.get("display")
+                        or condition.get("description")
+                        or condition.get("snomed_ct_display")
+                        or "Unknown condition",
+                        "onset_date": condition.get("onset_date"),
+                        "status": condition.get("status") or condition.get("clinical_status") or "active",
+                    }
+                )
+            return normalized
+
+        def _normalize_medications(data: dict[str, Any]) -> list[dict[str, Any]]:
+            canonical = data.get("active_medications")
+            if isinstance(canonical, list):
+                return [m for m in canonical if isinstance(m, dict)]
+
+            legacy = data.get("medications")
+            if not isinstance(legacy, list):
+                return []
+
+            normalized: list[dict[str, Any]] = []
+            for medication in legacy:
+                if isinstance(medication, str):
+                    normalized.append(
+                        {
+                            "rxcui": "unknown",
+                            "name": medication,
+                            "dose": "unknown",
+                            "frequency": "unknown",
+                            "start_date": None,
+                            "prescriber": None,
+                        }
+                    )
+                    continue
+                if not isinstance(medication, dict):
+                    continue
+                dose = medication.get("dose")
+                dose_unit = medication.get("dose_unit")
+                if isinstance(dose, str) and dose_unit and dose_unit not in dose:
+                    dose = f"{dose} {dose_unit}"
+                normalized.append(
+                    {
+                        "rxcui": str(
+                            medication.get("rxcui")
+                            or medication.get("rxnorm_cui")
+                            or medication.get("rxnorm")
+                            or "unknown"
+                        ),
+                        "name": medication.get("name") or medication.get("generic_name") or "Unknown medication",
+                        "dose": dose or "unknown",
+                        "frequency": medication.get("frequency_display")
+                        or medication.get("frequency")
+                        or "unknown",
+                        "start_date": medication.get("start_date"),
+                        "prescriber": medication.get("prescriber"),
+                    }
+                )
+            return normalized
+
+        def _normalize_allergies(data: dict[str, Any]) -> list[dict[str, Any]]:
+            allergies = data.get("allergies")
+            if not isinstance(allergies, list):
+                return []
+
+            normalized: list[dict[str, Any]] = []
+            for allergy in allergies:
+                if isinstance(allergy, str):
+                    normalized.append(
+                        {
+                            "substance": allergy,
+                            "reaction": "Unknown reaction",
+                            "severity": "mild",
+                        }
+                    )
+                    continue
+
+                if not isinstance(allergy, dict):
+                    continue
+
+                reactions = allergy.get("reactions")
+                reactions = reactions if isinstance(reactions, list) else []
+                first_reaction = reactions[0] if reactions and isinstance(reactions[0], dict) else {}
+                severity = (
+                    allergy.get("severity")
+                    or first_reaction.get("severity")
+                    or allergy.get("criticality")
+                    or "mild"
+                )
+                if severity == "high":
+                    severity = "severe"
+                elif severity == "low":
+                    severity = "mild"
+                if severity not in {"mild", "moderate", "severe"}:
+                    severity = "mild"
+
+                normalized.append(
+                    {
+                        "substance": allergy.get("substance") or "Unknown substance",
+                        "reaction": allergy.get("reaction")
+                        or first_reaction.get("manifestation")
+                        or "Unknown reaction",
+                        "severity": severity,
+                        "code": allergy.get("code") or allergy.get("snomed_ct_code"),
+                        "coding_system": allergy.get("coding_system")
+                        or ("SNOMED-CT" if allergy.get("snomed_ct_code") else None),
+                    }
+                )
+            return normalized
+
+        def _normalize_labs(data: dict[str, Any]) -> list[dict[str, Any]]:
+            canonical = data.get("recent_labs")
+            if isinstance(canonical, list):
+                return [lab for lab in canonical if isinstance(lab, dict)]
+
+            legacy = data.get("lab_results")
+            if isinstance(legacy, dict):
+                normalized_from_map: list[dict[str, Any]] = []
+                for key, value in legacy.items():
+                    parsed_value: float = 0
+                    if isinstance(value, (int, float)):
+                        parsed_value = float(value)
+                    elif isinstance(value, str):
+                        try:
+                            parsed_value = float(value)
+                        except ValueError:
+                            parsed_value = 0
+                    normalized_from_map.append(
+                        {
+                            "code": "unknown",
+                            "coding_system": "LOINC",
+                            "display": str(key),
+                            "value": parsed_value,
+                            "unit": "",
+                            "test_date": last_updated,
+                            "reference_range": None,
+                        }
+                    )
+                return normalized_from_map
+
+            if not isinstance(legacy, list):
+                # Older seed payloads used "labs" as a simple key/value map.
+                legacy_map = data.get("labs")
+                if not isinstance(legacy_map, dict):
+                    return []
+
+                normalized_from_legacy_map: list[dict[str, Any]] = []
+                for key, value in legacy_map.items():
+                    parsed_value: float = 0
+                    if isinstance(value, (int, float)):
+                        parsed_value = float(value)
+                    elif isinstance(value, str):
+                        try:
+                            parsed_value = float(value)
+                        except ValueError:
+                            parsed_value = 0
+
+                    normalized_from_legacy_map.append(
+                        {
+                            "code": "unknown",
+                            "coding_system": "LOINC",
+                            "display": str(key).upper(),
+                            "value": parsed_value,
+                            "unit": "",
+                            "test_date": last_updated,
+                            "reference_range": None,
+                        }
+                    )
+                return normalized_from_legacy_map
+
+            normalized: list[dict[str, Any]] = []
+            for lab in legacy:
+                if not isinstance(lab, dict):
+                    continue
+                reference = lab.get("reference_range")
+                if isinstance(reference, dict):
+                    reference = reference.get("text")
+                normalized.append(
+                    {
+                        "code": lab.get("code") or lab.get("loinc_code") or "unknown",
+                        "coding_system": lab.get("coding_system") or "LOINC",
+                        "display": lab.get("display") or lab.get("test_name") or "Unknown lab",
+                        "value": lab.get("value", 0),
+                        "unit": lab.get("unit", ""),
+                        "test_date": lab.get("test_date") or lab.get("effective_date"),
+                        "reference_range": reference if isinstance(reference, str) else None,
+                    }
+                )
+            return normalized
+
+        last_updated = (
+            profile.get("last_updated")
+            or profile.get("updated_at")
+            or profile.get("created_at")
+            or datetime.now(timezone.utc).isoformat()
+        )
+
+        return {
+            **profile,
+            "id": profile.get("id") or profile.get("patient_id"),
+            "patient_id": profile.get("patient_id") or profile.get("id"),
+            "doc_type": profile.get("doc_type", "patient_profile"),
+            "demographics": _normalize_demographics(profile),
+            "active_conditions": _normalize_conditions(profile),
+            "active_medications": _normalize_medications(profile),
+            "allergies": _normalize_allergies(profile),
+            "recent_labs": _normalize_labs(profile),
+            "last_updated": last_updated,
+        }
 
     async def update_patient_profile(
         self,

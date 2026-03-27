@@ -762,3 +762,46 @@ class CosmosDBClient:
                 error=str(exc),
             )
             raise AzureServiceError(f"Failed to retrieve ingestion status for '{document_id}': {exc}") from exc
+
+    async def delete_ingestion_status(
+        self,
+        document_id: str,
+        partition_key: str = "ingestion_status",
+    ) -> bool:
+        """Delete ingestion status for a document.
+
+        Args:
+            document_id: Ingestion document identifier.
+            partition_key: Cosmos partition key value.
+
+        Returns:
+            True if delete succeeded or the document was already absent.
+
+        Raises:
+            AzureServiceError: If the delete operation fails unexpectedly.
+        """
+        container = self._get_container(CONTAINER_AGENT_STATE)
+
+        try:
+            container.delete_item(item=document_id, partition_key=partition_key)
+            logger.debug(
+                "Ingestion status deleted",
+                document_id=document_id,
+                partition_key=partition_key,
+            )
+            return True
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            logger.debug(
+                "Ingestion status delete skipped; not found",
+                document_id=document_id,
+                partition_key=partition_key,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "Failed to delete ingestion status",
+                document_id=document_id,
+                partition_key=partition_key,
+                error=str(exc),
+            )
+            raise AzureServiceError(f"Failed to delete ingestion status for '{document_id}': {exc}") from exc

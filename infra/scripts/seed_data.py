@@ -15,13 +15,30 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
+import importlib.util
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
+
+SRC_DIR = Path(__file__).resolve().parents[2] / "src"
+SEED_HELPER_PATH = SRC_DIR / "cdss" / "tools" / "seed_sample_data.py"
+
+
+def _load_build_seed_patients():
+    spec = importlib.util.spec_from_file_location("cdss_seed_sample_data", SEED_HELPER_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load seed helper module: {SEED_HELPER_PATH}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module.build_seed_patients
+
+
+build_seed_patients = _load_build_seed_patients()
 
 
 def get_settings_from_env() -> dict[str, str]:
@@ -82,12 +99,12 @@ def seed_cosmos(settings: dict[str, str], sample_data_dir: Path) -> bool:
         print(f"[WARN] Sample patient file not found: {patient_file}")
         return False
 
-    with open(patient_file) as f:
-        patient = json.load(f)
+    seeded_profiles = build_seed_patients(now=datetime.now(UTC).isoformat())
+    for profile in seeded_profiles:
+        print(f"[INFO] Upserting patient profile: {profile.get('patient_id', 'unknown')}")
+        container.upsert_item(body=profile)
 
-    print(f"[INFO] Upserting patient profile: {patient.get('id', 'unknown')}")
-    container.upsert_item(body=patient)
-    print("[SUCCESS] Patient profile seeded to Cosmos DB")
+    print(f"[SUCCESS] Seeded {len(seeded_profiles)} patient profiles to Cosmos DB")
     return True
 
 
@@ -194,7 +211,7 @@ def main() -> int:
     print()
     print("Next steps:")
     print("  1. Run the ingestion pipeline to index documents")
-    print("  2. Test queries against patient_12345")
+    print("  2. Test patients (e.g., patient_12345, patient_1, patient_2)")
 
     return 0
 

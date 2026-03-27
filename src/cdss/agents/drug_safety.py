@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 import httpx
 
 from cdss.agents.base import BaseAgent
+from cdss.clients.drugbank_client import DrugBankClient
 from cdss.clients.openai_client import AzureOpenAIClient
 from cdss.clients.openfda_client import OpenFDAClient
 from cdss.core.config import Settings, get_settings
@@ -91,6 +93,15 @@ class DrugSafetyAgent(BaseAgent):
         self._rxnorm_client = rxnorm_client
         self._openfda_client = openfda_client or OpenFDAClient(settings=self._settings)
         self._drugbank_client = drugbank_client
+        if self._drugbank_client is None and self._settings.drugbank_api_key.strip():
+            try:
+                self._drugbank_client = DrugBankClient(settings=self._settings)
+                self.logger.info("DrugBank client enabled for interaction enrichment")
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to initialize DrugBank client; continuing with RxNorm-only interactions",
+                    extra={"error": str(exc)},
+                )
         self._openai_client = openai_client or AzureOpenAIClient(settings=self._settings)
         self._rxnorm_base_url = self._settings.rxnorm_base_url
         self._http_client = httpx.AsyncClient(timeout=15.0)
@@ -402,69 +413,16 @@ class DrugSafetyAgent(BaseAgent):
             )
             return interactions
 
-        # Use RxNorm interaction list endpoint
         rxcui_list = list(valid_rxcuis.values())
         rxcui_to_name = {v: k for k, v in valid_rxcuis.items()}
 
         try:
-            url = f"{self._rxnorm_base_url}/interaction/list.json"
-            params = {"rxcuis": "+".join(rxcui_list)}
-            response = await self._http_client.get(url, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-            interaction_groups = data.get("fullInteractionTypeGroup", [])
-
-            for group in interaction_groups:
-                source_name = group.get("sourceName", "RxNorm")
-                for interaction_type in group.get("fullInteractionType", []):
-                    interaction_pairs = interaction_type.get("interactionPair", [])
-                    for pair in interaction_pairs:
-                        # Extract the two drugs
-                        interaction_concepts = pair.get("interactionConcept", [])
-                        if len(interaction_concepts) >= 2:
-                            drug_a_rxcui = interaction_concepts[0].get(
-                                "minConceptItem", {}
-                            ).get("rxcui", "")
-                            drug_b_rxcui = interaction_concepts[1].get(
-                                "minConceptItem", {}
-                            ).get("rxcui", "")
-
-                            drug_a_name = rxcui_to_name.get(
-                                drug_a_rxcui,
-                                interaction_concepts[0].get(
-                                    "minConceptItem", {}
-                                ).get("name", "Unknown"),
-                            )
-                            drug_b_name = rxcui_to_name.get(
-                                drug_b_rxcui,
-                                interaction_concepts[1].get(
-                                    "minConceptItem", {}
-                                ).get("name", "Unknown"),
-                            )
-
-                        description = pair.get("description", "")
-                        severity_text = pair.get("severity", "N/A").lower()
-
-                        # Map severity text to our model's severity levels
-                        if "contraindicated" in severity_text or "high" in severity_text:
-                            severity = "major"
-                        elif "moderate" in severity_text:
-                            severity = "moderate"
-                        elif "low" in severity_text or "minor" in severity_text:
-                            severity = "minor"
-                        else:
-                            severity = "moderate"
-
-                        interactions.append({
-                            "drug_a": drug_a_name,
-                            "drug_b": drug_b_name,
-                            "severity": severity,
-                            "description": description,
-                            "evidence_level": 2,
-                            "source": source_name,
-                            "clinical_significance": severity_text,
-                        })
+            interactions.extend(
+                await self._check_rxnorm_interactions(
+                    rxcui_list=rxcui_list,
+                    rxcui_to_name=rxcui_to_name,
+                )
+            )
 
             self.logger.info(
                 "RxNorm DDI check completed",
@@ -480,6 +438,24 @@ class DrugSafetyAgent(BaseAgent):
                 extra={"error": str(exc)},
             )
 
+        # Fallback: derive explicit pair interactions from OpenFDA drug labels.
+        # This preserves structured interaction output even when RxNorm
+        # interaction endpoints are unavailable.
+        if not interactions:
+            try:
+                label_interactions = await self._check_openfda_label_interactions(drug_names)
+                if label_interactions:
+                    self.logger.info(
+                        "OpenFDA label interaction fallback produced interactions",
+                        extra={"interactions_found": len(label_interactions)},
+                    )
+                    interactions.extend(label_interactions)
+            except Exception as exc:
+                self.logger.warning(
+                    "OpenFDA label interaction fallback failed",
+                    extra={"error": str(exc)},
+                )
+
         # Also check DrugBank if client is available
         if self._drugbank_client is not None:
             try:
@@ -493,10 +469,173 @@ class DrugSafetyAgent(BaseAgent):
                     extra={"error": str(exc)},
                 )
 
+        return self._deduplicate_interactions(interactions)
+
+    async def _check_rxnorm_interactions(
+        self,
+        rxcui_list: list[str],
+        rxcui_to_name: dict[str, str],
+    ) -> list[dict]:
+        """Fetch RxNorm interactions with fallback for endpoint incompatibilities."""
+        selected_rxcuis = set(rxcui_list)
+        interactions: list[dict] = []
+
+        list_url = f"{self._rxnorm_base_url}/interaction/list.json"
+        list_params = {"rxcuis": "+".join(rxcui_list)}
+        response = await self._http_client.get(list_url, params=list_params)
+
+        if response.status_code < 400:
+            interactions.extend(
+                self._parse_rxnorm_interaction_payload(
+                    payload=response.json(),
+                    selected_rxcuis=selected_rxcuis,
+                    rxcui_to_name=rxcui_to_name,
+                )
+            )
+            return interactions
+
+        # Some RxNorm deployments return 404 for list endpoint. Fallback
+        # to per-RxCUI endpoint and keep only pairings inside the selected set.
+        self.logger.warning(
+            "RxNorm interaction list endpoint unavailable, using per-RxCUI fallback",
+            extra={"status_code": response.status_code, "url": list_url},
+        )
+
+        fallback_url = f"{self._rxnorm_base_url}/interaction/interaction.json"
+        for index, rxcui in enumerate(rxcui_list):
+            fallback_response = await self._http_client.get(fallback_url, params={"rxcui": rxcui})
+            if fallback_response.status_code >= 400:
+                if fallback_response.status_code == 404 and index == 0:
+                    self.logger.warning(
+                        "RxNorm per-RxCUI endpoint unavailable; skipping remaining fallback calls",
+                        extra={"status_code": fallback_response.status_code, "url": fallback_url},
+                    )
+                    break
+                self.logger.warning(
+                    "RxNorm per-RxCUI interaction lookup failed",
+                    extra={"rxcui": rxcui, "status_code": fallback_response.status_code},
+                )
+                continue
+
+            interactions.extend(
+                self._parse_rxnorm_interaction_payload(
+                    payload=fallback_response.json(),
+                    selected_rxcuis=selected_rxcuis,
+                    rxcui_to_name=rxcui_to_name,
+                )
+            )
+
         return interactions
 
+    def _parse_rxnorm_interaction_payload(
+        self,
+        payload: dict,
+        selected_rxcuis: set[str],
+        rxcui_to_name: dict[str, str],
+    ) -> list[dict]:
+        """Parse interaction payloads from both list and per-RxCUI RxNorm endpoints."""
+        interactions: list[dict] = []
+        groups = payload.get("fullInteractionTypeGroup", [])
+        for group in groups:
+            source_name = group.get("sourceName", "RxNorm")
+            for interaction_type in group.get("fullInteractionType", []):
+                for pair in interaction_type.get("interactionPair", []):
+                    record = self._build_rxnorm_interaction_record(
+                        pair=pair,
+                        source_name=source_name,
+                        selected_rxcuis=selected_rxcuis,
+                        rxcui_to_name=rxcui_to_name,
+                    )
+                    if record is not None:
+                        interactions.append(record)
+
+        # Fallback format seen in per-rxcui endpoint.
+        if interactions:
+            return interactions
+
+        alt_groups = payload.get("interactionTypeGroup", [])
+        for group in alt_groups:
+            source_name = group.get("sourceName", "RxNorm")
+            for interaction_type in group.get("interactionType", []):
+                for pair in interaction_type.get("interactionPair", []):
+                    record = self._build_rxnorm_interaction_record(
+                        pair=pair,
+                        source_name=source_name,
+                        selected_rxcuis=selected_rxcuis,
+                        rxcui_to_name=rxcui_to_name,
+                    )
+                    if record is not None:
+                        interactions.append(record)
+
+        return interactions
+
+    def _build_rxnorm_interaction_record(
+        self,
+        pair: dict,
+        source_name: str,
+        selected_rxcuis: set[str],
+        rxcui_to_name: dict[str, str],
+    ) -> dict | None:
+        """Normalize an RxNorm interaction pair to a CDSS interaction record."""
+        interaction_concepts = pair.get("interactionConcept", [])
+        if len(interaction_concepts) < 2:
+            return None
+
+        drug_a_min = interaction_concepts[0].get("minConceptItem", {})
+        drug_b_min = interaction_concepts[1].get("minConceptItem", {})
+        drug_a_rxcui = str(drug_a_min.get("rxcui", "")).strip()
+        drug_b_rxcui = str(drug_b_min.get("rxcui", "")).strip()
+        if not drug_a_rxcui or not drug_b_rxcui:
+            return None
+        if drug_a_rxcui not in selected_rxcuis or drug_b_rxcui not in selected_rxcuis:
+            return None
+
+        drug_a_name = rxcui_to_name.get(drug_a_rxcui, str(drug_a_min.get("name", "Unknown")))
+        drug_b_name = rxcui_to_name.get(drug_b_rxcui, str(drug_b_min.get("name", "Unknown")))
+        description = str(pair.get("description", "")).strip()
+        severity_text = str(pair.get("severity", "")).strip().lower()
+
+        return {
+            "drug_a": drug_a_name,
+            "drug_b": drug_b_name,
+            "severity": self._map_severity_label(severity_text),
+            "description": description,
+            "evidence_level": 2,
+            "source": source_name or "RxNorm",
+            "clinical_significance": severity_text,
+        }
+
+    def _map_severity_label(self, severity_text: str) -> str:
+        """Map free-text severity descriptions to the CDSS severity taxonomy."""
+        if "contraindicated" in severity_text or "high" in severity_text or "major" in severity_text:
+            return "major"
+        if "moderate" in severity_text:
+            return "moderate"
+        if "low" in severity_text or "minor" in severity_text:
+            return "minor"
+        return "moderate"
+
+    def _deduplicate_interactions(self, interactions: list[dict]) -> list[dict]:
+        """Drop duplicate interaction entries returned by multiple RxNorm paths."""
+        unique: list[dict] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for interaction in interactions:
+            drug_a = str(interaction.get("drug_a", "")).strip().lower()
+            drug_b = str(interaction.get("drug_b", "")).strip().lower()
+            if not drug_a or not drug_b:
+                continue
+            pair_key = tuple(sorted((drug_a, drug_b)))
+            source = str(interaction.get("source", "")).strip().lower()
+            description = str(interaction.get("description", "")).strip().lower()
+            dedupe_key = (pair_key[0], pair_key[1], source, description)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            unique.append(interaction)
+        return unique
+
     async def _check_drugbank_interactions(
-        self, drug_names: list[str], rxcui_map: dict[str, str]
+        self, drug_names: list[str], _rxcui_map: dict[str, str]
     ) -> list[dict]:
         """Check drug interactions via DrugBank API.
 
@@ -512,27 +651,161 @@ class DrugSafetyAgent(BaseAgent):
 
         interactions: list[dict] = []
         try:
-            # DrugBank API interaction check (implementation depends on API client)
-            for i, drug_a in enumerate(drug_names):
-                for drug_b in drug_names[i + 1:]:
-                    result = await self._drugbank_client.check_interaction(drug_a, drug_b)
-                    if result and result.get("has_interaction"):
-                        interactions.append({
+            if hasattr(self._drugbank_client, "check_interactions"):
+                raw_results = await self._drugbank_client.check_interactions(drug_names)
+                for entry in raw_results:
+                    drug_a_raw = entry.get("drug_a", {})
+                    drug_b_raw = entry.get("drug_b", {})
+                    drug_a = drug_a_raw.get("name", "") if isinstance(drug_a_raw, dict) else str(drug_a_raw)
+                    drug_b = drug_b_raw.get("name", "") if isinstance(drug_b_raw, dict) else str(drug_b_raw)
+                    if not drug_a or not drug_b:
+                        continue
+                    interactions.append(
+                        {
                             "drug_a": drug_a,
                             "drug_b": drug_b,
-                            "severity": result.get("severity", "moderate"),
-                            "description": result.get("description", ""),
-                            "evidence_level": result.get("evidence_level", 2),
+                            "severity": self._map_severity_label(str(entry.get("severity", "")).lower()),
+                            "description": entry.get("description", ""),
+                            "evidence_level": int(entry.get("evidence_level", 2) or 2),
                             "source": "DrugBank",
-                            "clinical_significance": result.get("clinical_significance", ""),
-                        })
+                            "clinical_significance": entry.get("clinical_significance", ""),
+                        }
+                    )
+                return interactions
+
+            # Legacy compatibility for clients exposing pairwise check_interaction.
+            if hasattr(self._drugbank_client, "check_interaction"):
+                for i, drug_a in enumerate(drug_names):
+                    for drug_b in drug_names[i + 1:]:
+                        result = await self._drugbank_client.check_interaction(drug_a, drug_b)
+                        if result and result.get("has_interaction"):
+                            interactions.append(
+                                {
+                                    "drug_a": drug_a,
+                                    "drug_b": drug_b,
+                                    "severity": self._map_severity_label(str(result.get("severity", "")).lower()),
+                                    "description": result.get("description", ""),
+                                    "evidence_level": int(result.get("evidence_level", 2) or 2),
+                                    "source": "DrugBank",
+                                    "clinical_significance": result.get("clinical_significance", ""),
+                                }
+                            )
+                return interactions
+
+            self.logger.warning("DrugBank client missing interaction methods; skipping")
         except Exception as exc:
             self.logger.warning(
                 "DrugBank interaction check failed",
                 extra={"error": str(exc)},
             )
 
-        return interactions
+        return self._deduplicate_interactions(interactions)
+
+    async def _check_openfda_label_interactions(self, drug_names: list[str]) -> list[dict]:
+        """Infer pairwise interactions from OpenFDA label text sections."""
+        labels_by_drug: dict[str, dict[str, Any] | None] = {}
+        tasks = [
+            self._openfda_client.get_drug_label(drug_name=name)
+            for name in drug_names
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for drug_name, result in zip(drug_names, results):
+            if isinstance(result, Exception):
+                self.logger.warning(
+                    "OpenFDA drug label lookup failed",
+                    extra={"drug_name": drug_name, "error": str(result)},
+                )
+                labels_by_drug[drug_name] = None
+                continue
+            labels_by_drug[drug_name] = result
+
+        interactions: list[dict] = []
+        for drug_a in drug_names:
+            label = labels_by_drug.get(drug_a)
+            if not label:
+                continue
+
+            interaction_text = " ".join(
+                [
+                    str(label.get("drug_interactions", "") or ""),
+                    str(label.get("contraindications", "") or ""),
+                    str(label.get("warnings", "") or ""),
+                ]
+            ).strip()
+            if not interaction_text:
+                continue
+
+            interaction_text_lower = interaction_text.lower()
+            for drug_b in drug_names:
+                if drug_a.lower() == drug_b.lower():
+                    continue
+                if not self._contains_medication_name(interaction_text_lower, drug_b):
+                    continue
+
+                interactions.append(
+                    {
+                        "drug_a": drug_a,
+                        "drug_b": drug_b,
+                        "severity": self._infer_label_severity(interaction_text_lower),
+                        "description": self._extract_label_snippet(interaction_text, drug_b),
+                        "evidence_level": 3,
+                        "source": "OpenFDA Label",
+                        "clinical_significance": "Label indicates potential interaction or contraindication.",
+                    }
+                )
+
+        return self._deduplicate_interactions(interactions)
+
+    def _contains_medication_name(self, haystack_lower: str, medication_name: str) -> bool:
+        """Check medication mention with word boundaries to reduce false positives."""
+        pattern = rf"\b{re.escape(medication_name.lower())}\b"
+        return re.search(pattern, haystack_lower) is not None
+
+    def _infer_label_severity(self, text_lower: str) -> str:
+        """Infer severity from regulatory-label interaction language."""
+        major_terms = (
+            "contraindicated",
+            "avoid concomitant",
+            "avoid use",
+            "not recommended",
+            "serious",
+            "life-threatening",
+            "major",
+            "fatal",
+        )
+        moderate_terms = (
+            "monitor",
+            "caution",
+            "increase",
+            "decrease",
+            "dose adjustment",
+            "adjust dose",
+            "bleeding risk",
+            "toxicity",
+            "interaction",
+        )
+        if any(term in text_lower for term in major_terms):
+            return "major"
+        if any(term in text_lower for term in moderate_terms):
+            return "moderate"
+        return "minor"
+
+    def _extract_label_snippet(self, text: str, medication_name: str, window: int = 180) -> str:
+        """Extract a short label snippet around the matched medication mention."""
+        text_lower = text.lower()
+        target = medication_name.lower()
+        idx = text_lower.find(target)
+        if idx == -1:
+            snippet = text[:window]
+        else:
+            start = max(0, idx - window // 2)
+            end = min(len(text), idx + len(target) + window // 2)
+            snippet = text[start:end]
+        compact = re.sub(r"\s+", " ", snippet).strip()
+        if len(compact) > 320:
+            compact = f"{compact[:317]}..."
+        return compact
 
     async def _check_adverse_events(self, drug_names: list[str]) -> list[dict]:
         """Query OpenFDA for adverse event signals for each drug.

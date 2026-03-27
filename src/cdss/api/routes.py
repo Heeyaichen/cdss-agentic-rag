@@ -24,6 +24,13 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from cdss.agents.drug_safety import DrugSafetyAgent
+from cdss.clients.search_client import (
+    INDEX_MEDICAL_LITERATURE,
+    INDEX_PATIENT_RECORDS,
+    INDEX_TREATMENT_PROTOCOLS,
+    AzureSearchClient,
+)
 from cdss.core.exceptions import (
     AzureServiceError,
     CDSSError,
@@ -31,7 +38,7 @@ from cdss.core.exceptions import (
     ValidationError,
 )
 from cdss.core.logging import get_logger
-from cdss.core.models import ClinicalResponse
+from cdss.core.models import AgentTask, ClinicalResponse
 from cdss.services.query_service import ClinicalQueryService
 
 logger = get_logger(__name__)
@@ -77,15 +84,22 @@ class FeedbackRequest(BaseModel):
     )
 
 
+class MedicationNameRequest(BaseModel):
+    """Medication input payload supporting name-only objects."""
+
+    name: str = Field(..., min_length=1, description="Medication display name.")
+    rxcui: str | None = Field(default=None, description="Optional RxNorm CUI.")
+
+
 class DrugInteractionRequest(BaseModel):
     """Request body for checking drug interactions."""
 
-    medications: list[str] = Field(
+    medications: list[str | MedicationNameRequest] = Field(
         ...,
         min_length=1,
         description="List of current medication names.",
     )
-    proposed_medications: list[str] | None = Field(
+    proposed_medications: list[str | MedicationNameRequest] | None = Field(
         default=None,
         description="Optional list of proposed new medications to check against.",
     )
@@ -110,6 +124,14 @@ class LiteratureSearchRequest(BaseModel):
         default=None,
         description="Optional start date filter (YYYY/MM/DD format).",
     )
+    date_range: dict[str, str] | None = Field(
+        default=None,
+        description="Optional date range filter with start/end ISO dates.",
+    )
+    article_types: list[str] | None = Field(
+        default=None,
+        description="Optional article type filters.",
+    )
 
 
 class ProtocolSearchRequest(BaseModel):
@@ -128,6 +150,22 @@ class ProtocolSearchRequest(BaseModel):
     evidence_grade: str | None = Field(
         default=None,
         description="Optional evidence grade filter (A, B, C, D, expert_opinion).",
+    )
+
+
+class DocumentVerificationRequest(BaseModel):
+    """Request body for document index and retrieval verification."""
+
+    phrase: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional phrase to verify retrieval from the indexed chunks.",
+    )
+    top: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum number of matching chunks to return.",
     )
 
 
@@ -697,6 +735,56 @@ async def _get_ingestion_status_record(
     return _ingestion_status.get(document_id)
 
 
+async def _delete_ingestion_status_record(
+    query_service: ClinicalQueryService,
+    document_id: str,
+) -> None:
+    _ingestion_status.pop(document_id, None)
+
+    cosmos_client = getattr(query_service, "cosmos_client", None)
+    if cosmos_client is None:
+        return
+    if not hasattr(cosmos_client, "delete_ingestion_status"):
+        return
+
+    try:
+        await cosmos_client.delete_ingestion_status(
+            document_id=document_id,
+            partition_key=_INGESTION_STATUS_PARTITION_KEY,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to delete ingestion status from Cosmos DB; local status removed",
+            extra={
+                "document_id": document_id,
+                "error": str(exc),
+            },
+        )
+
+
+def _resolve_logical_index_for_document_type(normalized_document_type: str) -> str:
+    if normalized_document_type == "clinical_guideline":
+        return INDEX_TREATMENT_PROTOCOLS
+    if normalized_document_type == "pubmed_abstract":
+        return INDEX_MEDICAL_LITERATURE
+    return INDEX_PATIENT_RECORDS
+
+
+def _resolve_workspace_target(normalized_document_type: str) -> str:
+    if normalized_document_type == "clinical_guideline":
+        return "protocol"
+    if normalized_document_type == "pubmed_abstract":
+        return "literature"
+    return "query_patient_context"
+
+
+def _build_content_preview(content: str, max_len: int = 180) -> str:
+    compact = " ".join(content.split())
+    if len(compact) <= max_len:
+        return compact
+    return f"{compact[: max_len - 3]}..."
+
+
 @router.post(
     "/api/v1/documents/ingest",
     tags=["Documents"],
@@ -977,6 +1065,150 @@ async def get_ingestion_status(
     return status
 
 
+@router.post(
+    "/api/v1/documents/{document_id}/verify",
+    tags=["Documents"],
+    summary="Verify indexed chunks and phrase retrieval for an ingested document",
+)
+async def verify_document_index_and_retrieval(
+    document_id: str,
+    request: DocumentVerificationRequest,
+    service: ClinicalQueryService = Depends(get_query_service),
+) -> dict:
+    """Verify that a document was indexed and can be retrieved by phrase.
+
+    This endpoint is intended for UI-native validation flows and returns
+    index proof (chunk presence by document_id) plus optional retrieval proof
+    for a provided phrase.
+    """
+    status = await _get_ingestion_status_record(service, document_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    normalized_document_type = str(
+        status.get("normalized_document_type")
+        or status.get("document_type")
+        or "generic"
+    )
+    pipeline_document_id = str(status.get("pipeline_document_id") or document_id)
+
+    logical_index_name = _resolve_logical_index_for_document_type(normalized_document_type)
+    workspace_target = _resolve_workspace_target(normalized_document_type)
+
+    try:
+        search_client = AzureSearchClient(settings=service.settings)
+
+        indexed_hits = await search_client.search_document_chunks(
+            index_name=logical_index_name,
+            document_id=pipeline_document_id,
+            search_text="*",
+            top=request.top,
+        )
+
+        phrase = (request.phrase or "").strip()
+        phrase_hits: list[dict] = []
+        if phrase:
+            phrase_hits = await search_client.search_document_chunks(
+                index_name=logical_index_name,
+                document_id=pipeline_document_id,
+                search_text=phrase,
+                top=request.top,
+            )
+
+        def normalize_hit(hit: dict) -> dict:
+            return {
+                "id": hit.get("id", ""),
+                "chunk_index": hit.get("chunk_index"),
+                "score": hit.get("score", 0.0),
+                "content_preview": _build_content_preview(str(hit.get("content", ""))),
+            }
+
+        return {
+            "document_id": document_id,
+            "pipeline_document_id": pipeline_document_id,
+            "document_type": str(status.get("document_type", "unknown")),
+            "normalized_document_type": normalized_document_type,
+            "workspace_target": workspace_target,
+            "logical_index_name": logical_index_name,
+            "physical_index_name": search_client.resolve_index_name(logical_index_name),
+            "indexed_chunks_count": len(indexed_hits),
+            "indexed_chunks": [normalize_hit(hit) for hit in indexed_hits],
+            "phrase": phrase or None,
+            "phrase_hits_count": len(phrase_hits),
+            "phrase_hits": [normalize_hit(hit) for hit in phrase_hits],
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Document verification failed: {exc}",
+        ) from exc
+
+
+@router.delete(
+    "/api/v1/documents/{document_id}",
+    tags=["Documents"],
+    summary="Delete an ingested document and its indexed chunks",
+)
+async def delete_ingested_document(
+    document_id: str,
+    service: ClinicalQueryService = Depends(get_query_service),
+) -> dict:
+    """Delete indexed chunks and ingestion status for an uploaded document."""
+    status = await _get_ingestion_status_record(service, document_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    current_status = str(status.get("status", "")).lower()
+    if current_status in {"pending", "queued", "processing"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Document is still processing. Wait until completion before deletion.",
+        )
+
+    normalized_document_type = str(
+        status.get("normalized_document_type")
+        or status.get("document_type")
+        or "generic"
+    )
+    pipeline_document_id = str(status.get("pipeline_document_id") or document_id)
+    logical_index_name = _resolve_logical_index_for_document_type(normalized_document_type)
+
+    try:
+        search_client = AzureSearchClient(settings=service.settings)
+        delete_summary = await search_client.delete_document_chunks(
+            index_name=logical_index_name,
+            document_id=pipeline_document_id,
+        )
+
+        if int(delete_summary.get("failed_count", 0)) > 0:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Document deletion was only partially successful. "
+                    "Some indexed chunks failed to delete; retry the operation."
+                ),
+            )
+
+        await _delete_ingestion_status_record(service, document_id)
+
+        return {
+            "document_id": document_id,
+            "pipeline_document_id": pipeline_document_id,
+            "normalized_document_type": normalized_document_type,
+            "logical_index_name": logical_index_name,
+            "physical_index_name": search_client.resolve_index_name(logical_index_name),
+            "deleted_chunks_count": int(delete_summary.get("deleted_count", 0)),
+            "status": "deleted",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Document deletion failed: {exc}",
+        ) from exc
+
+
 # ==========================================================================
 # Drug Safety Endpoints
 # ==========================================================================
@@ -993,8 +1225,8 @@ async def check_drug_interactions(
 ) -> dict:
     """Check drug-drug interactions for a list of medications.
 
-    Constructs a drug interaction query and routes it through the
-    orchestrator with the drug safety agent.
+    Normalizes incoming medication names and runs the dedicated
+    ``DrugSafetyAgent`` directly to produce deterministic interaction output.
 
     Args:
         request: The drug interaction check request.
@@ -1003,39 +1235,74 @@ async def check_drug_interactions(
     Returns:
         Drug interaction results including alerts and alternatives.
     """
-    # Build a query specifically for drug interaction checking
-    all_medications = list(request.medications)
-    proposed = request.proposed_medications or []
-    all_medications.extend(proposed)
+    def normalize_medication_names(items: list[str | MedicationNameRequest]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            raw_name = item if isinstance(item, str) else item.name
+            name = raw_name.strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(name)
+        return normalized
 
-    query_text = f"Check drug-drug interactions for the following medications: {', '.join(request.medications)}."
-    if proposed:
-        query_text += f" Also check interactions with proposed medications: {', '.join(proposed)}."
+    current_medications = normalize_medication_names(list(request.medications))
+    proposed_medications = normalize_medication_names(list(request.proposed_medications or []))
+    all_medications = [*current_medications, *proposed_medications]
+
+    if len(all_medications) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="At least two medication names are required for interaction analysis.",
+        )
 
     try:
-        response = await service.process_query(query_text=query_text)
-
-        # Extract drug safety specific data from the response
-        drug_safety_output = response.agent_outputs.get("drug_safety")
-        interactions_data = {}
-        if drug_safety_output and drug_safety_output.raw_data:
-            interactions_data = drug_safety_output.raw_data
+        drug_safety_agent = DrugSafetyAgent(settings=service.settings)
+        task = AgentTask(
+            from_agent="api",
+            to_agent="drug_safety",
+            message_type="task_request",
+            payload={
+                "query": (
+                    "Check drug-drug interactions for the following medications: "
+                    f"{', '.join(all_medications)}."
+                ),
+                "medications": current_medications,
+                "proposed_medications": proposed_medications,
+                "conditions": [],
+                "allergies": [],
+            },
+            session_id=str(uuid4()),
+            trace_id=str(uuid4()),
+        )
+        output = await drug_safety_agent.execute(task)
+        interactions_data = output.raw_data or {}
+        report_data = interactions_data.get("drug_safety_report", {})
+        raw_alerts = interactions_data.get("drug_alerts", interactions_data.get("alerts", []))
+        interactions = report_data.get("interactions", interactions_data.get("interactions", []))
 
         return {
-            "medications_checked": request.medications,
-            "proposed_medications": proposed,
-            "interactions": interactions_data.get("interactions", []),
+            "medications_checked": current_medications,
+            "proposed_medications": proposed_medications,
+            "interactions": interactions,
             "alerts": [
                 {
-                    "severity": alert.severity,
-                    "description": alert.description,
-                    "source": alert.source,
-                    "evidence_level": alert.evidence_level,
-                    "alternatives": alert.alternatives,
+                    "severity": alert.get("severity", "moderate"),
+                    "description": alert.get("description", ""),
+                    "source": alert.get("source", "unknown"),
+                    "evidence_level": int(alert.get("evidence_level", 2) or 2),
+                    "alternatives": alert.get("alternatives", []),
                 }
-                for alert in response.drug_alerts
+                for alert in raw_alerts
             ],
-            "summary": response.assessment,
+            "adverse_events": report_data.get("adverse_events", []),
+            "alternatives": report_data.get("alternatives", []),
+            "dosage_adjustments": report_data.get("dosage_adjustments", []),
+            "summary": interactions_data.get("summary", "Interaction analysis completed."),
         }
 
     except DrugSafetyError as exc:
@@ -1122,17 +1389,40 @@ async def search_literature(
         Search results with articles and relevance scores.
     """
     try:
-        response = await service.process_query(query_text=request.query)
+        query_text = request.query
+        if request.date_from:
+            query_text += f" (date_from: {request.date_from})"
+        if request.date_range:
+            start = request.date_range.get("start", "").strip()
+            end = request.date_range.get("end", "").strip()
+            if start or end:
+                query_text += f" (publication_date_range: {start or 'any'} to {end or 'any'})"
+        if request.article_types:
+            filtered_types = [t.strip() for t in request.article_types if t and t.strip()]
+            if filtered_types:
+                query_text += f" (article_types: {', '.join(filtered_types)})"
+
+        response = await service.process_query(query_text=query_text)
 
         literature_output = response.agent_outputs.get("literature")
         articles = []
         if literature_output and literature_output.raw_data:
-            articles = literature_output.raw_data.get("papers", [])
+            raw = literature_output.raw_data
+            if isinstance(raw.get("papers"), list):
+                articles = raw.get("papers", [])
+            elif isinstance(raw.get("articles"), list):
+                articles = raw.get("articles", [])
+            elif isinstance(raw.get("literature_evidence"), dict):
+                evidence = raw.get("literature_evidence", {})
+                papers = evidence.get("papers", [])
+                if isinstance(papers, list):
+                    articles = papers
 
         return {
             "query": request.query,
             "total_results": len(articles),
             "articles": articles[: request.max_results],
+            "papers": articles[: request.max_results],
             "evidence_summary": response.evidence_summary,
             "citations": [c.model_dump(mode="json") for c in response.citations],
         }
