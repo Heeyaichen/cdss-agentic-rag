@@ -4,8 +4,11 @@ import { runtimeConfig } from "@/config/runtime";
 import {
   ApiError,
   ClinicalResponse,
+  DocumentDeleteResponse,
   DocumentIngestResponse,
   DocumentIngestionStatusResponse,
+  DocumentSearchVerificationRequest,
+  DocumentSearchVerificationResponse,
   PatientListResponse,
   PatientProfile,
   StreamingQueryUpdate,
@@ -111,10 +114,9 @@ export const clinicalApi = {
     return apiClient.get<PatientListResponse>('/v1/patients', { params });
   },
 
-  checkDrugInteractions: async (medications: Array<{ name: string; rxcui?: string }>, patientId?: string) => {
+  checkDrugInteractions: async (medications: string[]) => {
     return apiClient.post('/v1/drugs/interactions', {
       medications,
-      patient_id: patientId,
     });
   },
 
@@ -134,11 +136,15 @@ export const clinicalApi = {
   ingestDocument: async (
     file: File,
     documentType: string,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
+    patientId?: string
   ): Promise<DocumentIngestResponse> => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('document_type', documentType);
+    if (patientId && patientId.trim().length > 0) {
+      formData.append('patient_id', patientId.trim());
+    }
     if (metadata) {
       formData.append('metadata', JSON.stringify(metadata));
     }
@@ -149,6 +155,17 @@ export const clinicalApi = {
 
   getDocumentIngestionStatus: async (documentId: string): Promise<DocumentIngestionStatusResponse> => {
     return apiClient.get<DocumentIngestionStatusResponse>(`/v1/documents/${documentId}/status`);
+  },
+
+  verifyDocumentInSearch: async (
+    documentId: string,
+    payload: DocumentSearchVerificationRequest
+  ): Promise<DocumentSearchVerificationResponse> => {
+    return apiClient.post<DocumentSearchVerificationResponse>(`/v1/documents/${documentId}/verify`, payload);
+  },
+
+  deleteDocument: async (documentId: string): Promise<DocumentDeleteResponse> => {
+    return apiClient.delete<DocumentDeleteResponse>(`/v1/documents/${documentId}`);
   },
 
   getAuditTrail: async (params: {

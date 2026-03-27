@@ -243,6 +243,20 @@ export default function QueryPage() {
   const selectedPatient = useSelectedPatient();
   const setSelectedPatient = useSetSelectedPatient();
   const patientId = selectedPatient.selectedPatientId || undefined;
+  const snapshotPatient = selectedPatient.selectedPatient;
+  const snapshotDemographics = snapshotPatient?.demographics;
+  const snapshotConditionsCount = Array.isArray(snapshotPatient?.active_conditions)
+    ? snapshotPatient.active_conditions.length
+    : 0;
+  const snapshotMedicationsCount = Array.isArray(snapshotPatient?.active_medications)
+    ? snapshotPatient.active_medications.length
+    : 0;
+  const snapshotAllergiesCount = Array.isArray(snapshotPatient?.allergies)
+    ? snapshotPatient.allergies.length
+    : 0;
+  const snapshotLabsCount = Array.isArray(snapshotPatient?.recent_labs)
+    ? snapshotPatient.recent_labs.length
+    : 0;
 
   const { data: patientSearchResults, isLoading: searchingPatients } = usePatientSearch(patientSearch);
   const {
@@ -679,26 +693,26 @@ export default function QueryPage() {
         <Grid item xs={12} lg={3}>
           <Stack spacing={2} sx={{ position: { lg: 'sticky' }, top: { lg: 76 }, alignSelf: 'flex-start' }}>
             <SectionCard title="Patient Snapshot">
-              {selectedPatient.selectedPatient ? (
+              {snapshotPatient ? (
                 <>
                   <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                    {selectedPatient.selectedPatient.patient_id}
+                    {snapshotPatient.patient_id}
                   </Typography>
                   <Stack spacing={0.6}>
                     <Typography variant="body2">
-                      Age: {selectedPatient.selectedPatient.demographics.age}
+                      Age: {snapshotDemographics?.age ?? 'Unknown'}
                     </Typography>
                     <Typography variant="body2">
-                      Sex: {selectedPatient.selectedPatient.demographics.sex}
+                      Sex: {snapshotDemographics?.sex ?? 'Unknown'}
                     </Typography>
                     <Typography variant="body2">
-                      Conditions: {selectedPatient.selectedPatient.active_conditions.length}
+                      Conditions: {snapshotConditionsCount}
                     </Typography>
                     <Typography variant="body2">
-                      Medications: {selectedPatient.selectedPatient.active_medications.length}
+                      Medications: {snapshotMedicationsCount}
                     </Typography>
                     <Typography variant="body2">
-                      Allergies: {selectedPatient.selectedPatient.allergies.length}
+                      Allergies: {snapshotAllergiesCount}
                     </Typography>
                   </Stack>
                 </>
@@ -732,7 +746,7 @@ export default function QueryPage() {
                     primary={
                       <Typography variant="caption">
                         {selectedPatient.selectedPatient
-                          ? `${selectedPatient.selectedPatient.recent_labs.length} recent lab result(s) in context`
+                          ? `${snapshotLabsCount} recent lab result(s) in context`
                           : 'No patient labs loaded yet'}
                       </Typography>
                     }

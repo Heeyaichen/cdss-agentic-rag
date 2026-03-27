@@ -24,7 +24,7 @@ import { useMutation } from "@tanstack/react-query";
 import InteractionMatrix from "@/components/drugs/InteractionMatrix";
 import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
-import type { DrugInteraction } from "@/lib/types";
+import type { ApiError, DrugInteraction } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
 
 const COMMON_MEDICATIONS = [
@@ -62,7 +62,7 @@ export default function DrugCheckerPage() {
   const [inputValue, setInputValue] = React.useState("");
 
   const checkInteractions = useMutation({
-    mutationFn: () => clinicalApi.checkDrugInteractions(medications.map((name) => ({ name }))),
+    mutationFn: () => clinicalApi.checkDrugInteractions(medications),
   });
 
   const interactions = ((checkInteractions.data as { interactions?: DrugInteraction[] } | undefined)?.interactions ?? []).slice();
@@ -74,6 +74,22 @@ export default function DrugCheckerPage() {
 
   const alternatives = (checkInteractions.data as { alternatives?: string[] } | undefined)?.alternatives ?? [];
   const dosageAdjustments = (checkInteractions.data as { dosage_adjustments?: string[] } | undefined)?.dosage_adjustments ?? [];
+  const interactionErrorMessage = React.useMemo(() => {
+    if (!checkInteractions.isError) return "";
+    const error = checkInteractions.error as ApiError | undefined;
+    const details = error?.details as { detail?: unknown } | undefined;
+    const detail = details?.detail;
+    if (typeof detail === "string" && detail.trim().length > 0) return detail;
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0] as { msg?: string } | string | undefined;
+      if (typeof first === "string" && first.trim().length > 0) return first;
+      if (first && typeof first === "object" && typeof first.msg === "string" && first.msg.trim().length > 0) {
+        return first.msg;
+      }
+    }
+    if (error?.message && error.message.trim().length > 0) return error.message;
+    return "Interaction analysis failed. Retry after verifying medication names.";
+  }, [checkInteractions.error, checkInteractions.isError]);
 
   const handleMedicationChange = (_: React.SyntheticEvent, values: string[]) => {
     const normalized = Array.from(
@@ -152,7 +168,7 @@ export default function DrugCheckerPage() {
 
       {checkInteractions.isError && (
         <Alert severity="error" sx={{ mb: spacing[3] }}>
-          Interaction analysis failed. Retry after verifying medication names.
+          {interactionErrorMessage}
         </Alert>
       )}
 

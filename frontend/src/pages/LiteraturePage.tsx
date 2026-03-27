@@ -34,6 +34,7 @@ interface RankedArticle extends PubMedArticle {
 function normalizePapers(raw: unknown): PubMedArticle[] {
   if (!raw || typeof raw !== "object") return [];
   const record = raw as Record<string, unknown>;
+  if (Array.isArray(record.articles)) return record.articles as PubMedArticle[];
   if (Array.isArray(record.papers)) return record.papers as PubMedArticle[];
   if (Array.isArray(record.results)) return record.results as PubMedArticle[];
   if (Array.isArray(record.items)) return record.items as PubMedArticle[];

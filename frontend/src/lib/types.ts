@@ -253,6 +253,43 @@ export interface DocumentIngestionStatusResponse {
   message?: string;
 }
 
+export interface DocumentSearchVerificationRequest {
+  phrase?: string;
+  top?: number;
+}
+
+export interface DocumentSearchVerificationHit {
+  id: string;
+  chunk_index?: number;
+  content_preview?: string;
+  score?: number;
+}
+
+export interface DocumentSearchVerificationResponse {
+  document_id: string;
+  pipeline_document_id: string;
+  document_type: string;
+  normalized_document_type: string;
+  workspace_target: string;
+  logical_index_name: string;
+  physical_index_name: string;
+  indexed_chunks_count: number;
+  indexed_chunks: DocumentSearchVerificationHit[];
+  phrase?: string;
+  phrase_hits_count: number;
+  phrase_hits: DocumentSearchVerificationHit[];
+}
+
+export interface DocumentDeleteResponse {
+  document_id: string;
+  pipeline_document_id: string;
+  normalized_document_type: string;
+  logical_index_name: string;
+  physical_index_name: string;
+  deleted_chunks_count: number;
+  status: "deleted";
+}
+
 export interface HealthCheckResponse {
   status: 'healthy' | 'degraded' | 'unhealthy';
   version: string;
