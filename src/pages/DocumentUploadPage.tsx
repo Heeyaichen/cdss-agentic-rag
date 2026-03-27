@@ -8,10 +8,12 @@ import {
   Chip,
   Grid,
   LinearProgress,
+  MenuItem,
   Stack,
   Step,
   StepLabel,
   Stepper,
+  TextField,
   Typography,
 } from "@mui/material";
 import {
@@ -25,24 +27,52 @@ import {
 } from "@mui/icons-material";
 import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
-import type { DocumentIngestionStatusResponse } from "@/lib/types";
+import type { ApiError, DocumentIngestionStatusResponse, DocumentSearchVerificationResponse } from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
 
 type PipelineStage = "queued" | "uploading" | "parsing" | "indexing" | "completed" | "error";
 
 interface PipelineFile {
   id: string;
-  file: File;
+  file?: File;
+  fileName: string;
+  fileSize: number;
+  requestedDocumentType: IngestionDocumentType;
+  patientId?: string;
   stage: PipelineStage;
   progress: number;
   message?: string;
   documentId?: string;
+  updatedAt: string;
 }
 
-const DEFAULT_DOCUMENT_TYPE = "patient_record";
+interface StoredPipelineFile {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  requestedDocumentType: IngestionDocumentType;
+  patientId?: string;
+  stage: PipelineStage;
+  progress: number;
+  message?: string;
+  documentId?: string;
+  updatedAt: string;
+}
+
+type IngestionDocumentType = "patient_record" | "protocol" | "literature";
+
 const POLL_INTERVAL_MS = 1200;
 const MAX_POLL_ATTEMPTS = 120;
 const STAGE_ORDER: PipelineStage[] = ["queued", "uploading", "parsing", "indexing", "completed"];
+const ALL_STAGES: PipelineStage[] = [...STAGE_ORDER, "error"];
+const STORAGE_KEY = "cdss.documents.pipeline.v1";
+const MAX_STORED_ITEMS = 50;
+const DEFAULT_PATIENT_ID = "patient_12345";
+const DOCUMENT_TYPE_LABELS: Record<IngestionDocumentType, string> = {
+  patient_record: "Patient Record (Query/Patients)",
+  protocol: "Protocol (Guideline Search)",
+  literature: "Literature (Evidence Search)",
+};
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -53,6 +83,74 @@ function wait(ms: number): Promise<void> {
 function clampProgress(value?: number): number {
   if (typeof value !== "number" || Number.isNaN(value)) return 0;
   return Math.max(0, Math.min(100, value));
+}
+
+function normalizeStage(value: unknown): PipelineStage {
+  if (typeof value === "string" && ALL_STAGES.includes(value as PipelineStage)) {
+    return value as PipelineStage;
+  }
+  return "queued";
+}
+
+function loadPipelineHistory(): PipelineFile[] {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .slice(-MAX_STORED_ITEMS)
+      .flatMap((item: unknown) => {
+        if (!item || typeof item !== "object") return [];
+        const record = item as Partial<StoredPipelineFile>;
+        if (!record.id || !record.fileName || typeof record.fileSize !== "number") return [];
+
+        const requestedDocumentType =
+          record.requestedDocumentType === "protocol" ||
+          record.requestedDocumentType === "literature" ||
+          record.requestedDocumentType === "patient_record"
+            ? record.requestedDocumentType
+            : "patient_record";
+
+        return [
+          {
+            id: record.id,
+            fileName: record.fileName,
+            fileSize: Math.max(0, record.fileSize),
+            requestedDocumentType,
+            patientId: record.patientId,
+            stage: normalizeStage(record.stage),
+            progress: clampProgress(record.progress),
+            message: record.message,
+            documentId: record.documentId,
+            updatedAt: record.updatedAt || new Date().toISOString(),
+          },
+        ];
+      });
+  } catch {
+    return [];
+  }
+}
+
+function persistPipelineHistory(files: PipelineFile[]): void {
+  if (typeof window === "undefined") return;
+
+  const serializable: StoredPipelineFile[] = files.slice(-MAX_STORED_ITEMS).map((entry) => ({
+    id: entry.id,
+    fileName: entry.fileName,
+    fileSize: entry.fileSize,
+    requestedDocumentType: entry.requestedDocumentType,
+    patientId: entry.patientId,
+    stage: entry.stage,
+    progress: clampProgress(entry.progress),
+    message: entry.message,
+    documentId: entry.documentId,
+    updatedAt: entry.updatedAt,
+  }));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
 }
 
 function mapStatusToStage(payload: DocumentIngestionStatusResponse): { stage: PipelineStage; progress: number } {
@@ -113,8 +211,17 @@ function formatFileSize(bytes: number): string {
 }
 
 export default function DocumentUploadPage() {
-  const [pipelineFiles, setPipelineFiles] = React.useState<PipelineFile[]>([]);
+  const [pipelineFiles, setPipelineFiles] = React.useState<PipelineFile[]>(() => loadPipelineHistory());
   const [dragActive, setDragActive] = React.useState(false);
+  const [selectedDocumentType, setSelectedDocumentType] = React.useState<IngestionDocumentType>("patient_record");
+  const [patientIdInput, setPatientIdInput] = React.useState(DEFAULT_PATIENT_ID);
+  const [verificationPhraseById, setVerificationPhraseById] = React.useState<Record<string, string>>({});
+  const [verificationResultById, setVerificationResultById] = React.useState<Record<string, DocumentSearchVerificationResponse>>(
+    {}
+  );
+  const [verificationErrorById, setVerificationErrorById] = React.useState<Record<string, string>>({});
+  const [verifyingById, setVerifyingById] = React.useState<Record<string, boolean>>({});
+  const [deletingById, setDeletingById] = React.useState<Record<string, boolean>>({});
   const isMountedRef = React.useRef(true);
 
   React.useEffect(() => {
@@ -123,28 +230,118 @@ export default function DocumentUploadPage() {
     };
   }, []);
 
+  React.useEffect(() => {
+    persistPipelineHistory(pipelineFiles);
+  }, [pipelineFiles]);
+
   const addFiles = (incoming: File[]) => {
     if (incoming.length === 0) return;
     setPipelineFiles((prev) => {
-      const existing = new Set(prev.map((entry) => `${entry.file.name}:${entry.file.size}`));
+      const typedPatientId = selectedDocumentType === "patient_record" ? patientIdInput.trim() : "";
+      const existing = new Set(
+        prev.map(
+          (entry) =>
+            `${entry.fileName}:${entry.fileSize}:${entry.requestedDocumentType}:${(entry.patientId || "").trim()}`
+        )
+      );
       const additions = incoming
-        .filter((file) => !existing.has(`${file.name}:${file.size}`))
+        .filter(
+          (file) =>
+            !existing.has(`${file.name}:${file.size}:${selectedDocumentType}:${typedPatientId}`)
+        )
         .map((file) => ({
           id: `${file.name}-${file.size}-${crypto.randomUUID()}`,
           file,
+          fileName: file.name,
+          fileSize: file.size,
+          requestedDocumentType: selectedDocumentType,
+          patientId: typedPatientId || undefined,
           stage: "queued" as PipelineStage,
           progress: 0,
+          updatedAt: new Date().toISOString(),
         }));
-      return [...prev, ...additions];
+      return [...prev, ...additions].slice(-MAX_STORED_ITEMS);
     });
   };
 
   const updateFile = (fileId: string, updates: Partial<PipelineFile>) => {
-    setPipelineFiles((prev) => prev.map((entry) => (entry.id === fileId ? { ...entry, ...updates } : entry)));
+    setPipelineFiles((prev) =>
+      prev.map((entry) =>
+        entry.id === fileId
+          ? {
+              ...entry,
+              ...updates,
+              updatedAt: updates.updatedAt || new Date().toISOString(),
+            }
+          : entry
+      )
+    );
   };
 
   const removeFile = (fileId: string) => {
     setPipelineFiles((prev) => prev.filter((entry) => entry.id !== fileId));
+    setVerificationPhraseById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setVerificationResultById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setVerificationErrorById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setVerifyingById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setDeletingById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  };
+
+  const deleteDocument = async (entry: PipelineFile) => {
+    if (!entry.documentId) {
+      removeFile(entry.id);
+      return;
+    }
+
+    const shouldDelete = window.confirm(
+      "Delete this ingested document from backend indexes and remove it from this dashboard?"
+    );
+    if (!shouldDelete) return;
+
+    setDeletingById((prev) => ({ ...prev, [entry.id]: true }));
+    setVerificationErrorById((prev) => {
+      const next = { ...prev };
+      delete next[entry.id];
+      return next;
+    });
+
+    try {
+      await clinicalApi.deleteDocument(entry.documentId);
+      removeFile(entry.id);
+    } catch (error) {
+      const apiError = error as ApiError;
+      const message = apiError.message || "Failed to delete ingested document from backend.";
+      setVerificationErrorById((prev) => ({ ...prev, [entry.id]: message }));
+      updateFile(entry.id, {
+        message,
+      });
+    } finally {
+      setDeletingById((prev) => {
+        const next = { ...prev };
+        delete next[entry.id];
+        return next;
+      });
+    }
   };
 
   const pollDocumentStatus = async (fileId: string, documentId: string): Promise<void> => {
@@ -157,6 +354,7 @@ export default function DocumentUploadPage() {
           stage,
           progress,
           message: statusMessage(statusPayload, stage),
+          ...(stage === "completed" ? { file: undefined } : {}),
         });
 
         if (stage === "completed" || stage === "error") {
@@ -184,6 +382,15 @@ export default function DocumentUploadPage() {
   };
 
   const runPipeline = async (entry: PipelineFile) => {
+    if (!entry.file) {
+      updateFile(entry.id, {
+        stage: "error",
+        progress: 100,
+        message: "Original file is unavailable. Re-upload the document to retry ingestion.",
+      });
+      return;
+    }
+
     updateFile(entry.id, {
       stage: "uploading",
       progress: 6,
@@ -191,7 +398,22 @@ export default function DocumentUploadPage() {
     });
 
     try {
-      const response = await clinicalApi.ingestDocument(entry.file, DEFAULT_DOCUMENT_TYPE);
+      const metadata =
+        entry.requestedDocumentType === "protocol"
+          ? {
+              guideline_name: entry.fileName,
+              guideline: entry.fileName,
+              specialty: "general",
+              version: "1.0",
+            }
+          : undefined;
+
+      const response = await clinicalApi.ingestDocument(
+        entry.file,
+        entry.requestedDocumentType,
+        metadata,
+        entry.patientId
+      );
       if (!response.document_id) {
         throw new Error("Missing document_id from ingestion response.");
       }
@@ -215,7 +437,9 @@ export default function DocumentUploadPage() {
   };
 
   const runAllQueued = async () => {
-    const queued = pipelineFiles.filter((entry) => entry.stage === "queued" || entry.stage === "error");
+    const queued = pipelineFiles.filter(
+      (entry) => (entry.stage === "queued" || entry.stage === "error") && Boolean(entry.file)
+    );
     for (const entry of queued) {
       await runPipeline(entry);
     }
@@ -224,6 +448,14 @@ export default function DocumentUploadPage() {
   const retryFile = async (fileId: string) => {
     const entry = pipelineFiles.find((item) => item.id === fileId);
     if (!entry) return;
+    if (!entry.file) {
+      updateFile(fileId, {
+        stage: "error",
+        progress: 100,
+        message: "Original file is unavailable. Re-upload the document to retry ingestion.",
+      });
+      return;
+    }
     const resetEntry: PipelineFile = {
       ...entry,
       stage: "queued",
@@ -233,6 +465,32 @@ export default function DocumentUploadPage() {
     };
     updateFile(fileId, resetEntry);
     await runPipeline(resetEntry);
+  };
+
+  const verifyIndexedDocument = async (entry: PipelineFile) => {
+    if (!entry.documentId) return;
+
+    setVerifyingById((prev) => ({ ...prev, [entry.id]: true }));
+    setVerificationErrorById((prev) => ({ ...prev, [entry.id]: "" }));
+
+    try {
+      const phrase = (verificationPhraseById[entry.id] || "").trim();
+      const verification = await clinicalApi.verifyDocumentInSearch(entry.documentId, {
+        phrase: phrase.length > 0 ? phrase : undefined,
+        top: 5,
+      });
+      setVerificationResultById((prev) => ({ ...prev, [entry.id]: verification }));
+    } catch (error) {
+      const apiError = error as ApiError | undefined;
+      const detail = apiError?.details as { detail?: unknown } | undefined;
+      const message =
+        (typeof detail?.detail === "string" && detail.detail) ||
+        apiError?.message ||
+        "Document verification failed.";
+      setVerificationErrorById((prev) => ({ ...prev, [entry.id]: message }));
+    } finally {
+      setVerifyingById((prev) => ({ ...prev, [entry.id]: false }));
+    }
   };
 
   const completedCount = pipelineFiles.filter((entry) => entry.stage === "completed").length;
@@ -256,6 +514,32 @@ export default function DocumentUploadPage() {
                 <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
                   Upload Queue
                 </Typography>
+
+                <TextField
+                  select
+                  size="small"
+                  label="Document Type"
+                  value={selectedDocumentType}
+                  onChange={(event) => setSelectedDocumentType(event.target.value as IngestionDocumentType)}
+                  helperText="Controls which workspace/index this upload targets."
+                >
+                  {Object.entries(DOCUMENT_TYPE_LABELS).map(([value, label]) => (
+                    <MenuItem key={value} value={value}>
+                      {label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+
+                {selectedDocumentType === "patient_record" && (
+                  <TextField
+                    size="small"
+                    label="Patient ID (optional)"
+                    value={patientIdInput}
+                    onChange={(event) => setPatientIdInput(event.target.value)}
+                    placeholder="patient_12345"
+                    helperText="Attach patient records to a specific patient context."
+                  />
+                )}
 
                 <Box
                   onDragOver={(event) => {
@@ -325,7 +609,13 @@ export default function DocumentUploadPage() {
                     variant="text"
                     color="inherit"
                     disabled={pipelineFiles.length === 0 || inFlightCount > 0}
-                    onClick={() => setPipelineFiles([])}
+                    onClick={() => {
+                      setPipelineFiles([]);
+                      setVerificationPhraseById({});
+                      setVerificationResultById({});
+                      setVerificationErrorById({});
+                      setVerifyingById({});
+                    }}
                   >
                     Clear Queue
                   </Button>
@@ -351,6 +641,17 @@ export default function DocumentUploadPage() {
 
             {pipelineFiles.map((entry) => {
               const activeStep = entry.stage === "error" ? 1 : Math.max(STAGE_ORDER.findIndex((item) => item === entry.stage), 0);
+              const verification = verificationResultById[entry.id];
+              const verificationError = verificationErrorById[entry.id];
+              const isVerifying = verifyingById[entry.id] === true;
+              const isDeleting = deletingById[entry.id] === true;
+              const phraseValue = verificationPhraseById[entry.id] ?? "";
+              const defaultPhrase =
+                entry.requestedDocumentType === "protocol"
+                  ? "guideline recommendation"
+                  : entry.requestedDocumentType === "literature"
+                    ? "trial outcome"
+                    : "CKD Stage G3a-A2";
 
               return (
                 <Card key={entry.id} sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>
@@ -359,11 +660,25 @@ export default function DocumentUploadPage() {
                       <Grid item xs={12} md={4}>
                         <Stack spacing={1}>
                           <Typography variant="subtitle2" sx={{ wordBreak: "break-word" }}>
-                            {entry.file.name}
+                            {entry.fileName}
                           </Typography>
                           <Typography variant="caption" color="text.secondary">
-                            {formatFileSize(entry.file.size)}
+                            {formatFileSize(entry.fileSize)}
                           </Typography>
+                          <Chip
+                            size="small"
+                            label={DOCUMENT_TYPE_LABELS[entry.requestedDocumentType]}
+                            sx={{
+                              alignSelf: "flex-start",
+                              bgcolor: alphaUtil(semantic.info.main, 0.1),
+                              color: semantic.info.main,
+                            }}
+                          />
+                          {entry.patientId && (
+                            <Typography variant="caption" color="text.secondary">
+                              Patient: {entry.patientId}
+                            </Typography>
+                          )}
                           <Chip
                             size="small"
                             label={stageLabel(entry.stage)}
@@ -415,13 +730,37 @@ export default function DocumentUploadPage() {
                       <Grid item xs={12} md={3}>
                         <Stack direction={{ xs: "row", md: "column" }} spacing={1} justifyContent="flex-end">
                           {entry.stage === "error" && (
-                            <Button size="small" variant="outlined" startIcon={<Replay />} onClick={() => retryFile(entry.id)}>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<Replay />}
+                              onClick={() => retryFile(entry.id)}
+                              disabled={!entry.file}
+                            >
                               Retry
                             </Button>
                           )}
                           {entry.stage === "completed" && (
-                            <Button size="small" variant="outlined" color="success" startIcon={<DoneAll />} disabled>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              color="success"
+                              startIcon={<DoneAll />}
+                              disabled={isDeleting}
+                            >
                               Ready
+                            </Button>
+                          )}
+                          {entry.stage === "completed" && (
+                            <Button
+                              size="small"
+                              variant="text"
+                              color="error"
+                              startIcon={<Delete />}
+                              onClick={() => void deleteDocument(entry)}
+                              disabled={isDeleting}
+                            >
+                              {isDeleting ? "Deleting..." : "Delete"}
                             </Button>
                           )}
                           {(entry.stage === "queued" || entry.stage === "error") && (
@@ -438,6 +777,60 @@ export default function DocumentUploadPage() {
                         </Stack>
                       </Grid>
                     </Grid>
+
+                    {entry.stage === "completed" && entry.documentId && (
+                      <Box sx={{ mt: 2, pt: 2, borderTop: "1px solid", borderColor: "divider" }}>
+                        <Stack spacing={1.2}>
+                          <Typography variant="subtitle2">Validation (UI-native)</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Proves index persistence and phrase retrieval for this ingestion target.
+                          </Typography>
+                          <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                            <TextField
+                              size="small"
+                              label="Phrase for retrieval proof (optional)"
+                              placeholder={defaultPhrase}
+                              value={phraseValue}
+                              onChange={(event) =>
+                                setVerificationPhraseById((prev) => ({ ...prev, [entry.id]: event.target.value }))
+                              }
+                              fullWidth
+                            />
+                            <Button
+                              variant="outlined"
+                              onClick={() => void verifyIndexedDocument(entry)}
+                              disabled={isVerifying || isDeleting}
+                            >
+                              {isVerifying ? "Verifying..." : "Verify Index & Retrieval"}
+                            </Button>
+                          </Stack>
+
+                          {verificationError && (
+                            <Alert severity="error" sx={{ borderRadius: borderRadius.sm }}>
+                              {verificationError}
+                            </Alert>
+                          )}
+
+                          {verification && (
+                            <Alert severity="success" sx={{ borderRadius: borderRadius.sm }}>
+                              <Stack spacing={0.5}>
+                                <Typography variant="body2">
+                                  Workspace target: <strong>{verification.workspace_target}</strong> | Index:{" "}
+                                  <strong>{verification.physical_index_name}</strong>
+                                </Typography>
+                                <Typography variant="body2">
+                                  Indexed chunks: <strong>{verification.indexed_chunks_count}</strong>
+                                </Typography>
+                                <Typography variant="body2">
+                                  Phrase hits: <strong>{verification.phrase_hits_count}</strong>
+                                  {verification.phrase ? ` for "${verification.phrase}"` : " (no phrase provided)"}
+                                </Typography>
+                              </Stack>
+                            </Alert>
+                          )}
+                        </Stack>
+                      </Box>
+                    )}
                   </CardContent>
                 </Card>
               );

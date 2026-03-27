@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Avatar,
+  Button,
   Box,
   Card,
   CardContent,
@@ -23,6 +24,7 @@ import MedicationList from "@/components/patient/MedicationList";
 import { PageContainer, PageHeader } from "@/components/ui";
 import { usePatient, usePatientSearch } from "@/hooks/usePatientData";
 import type { LabResult, PatientProfile } from "@/lib/types";
+import { usePatientStore } from "@/stores/patientStore";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing, transitions } from "@/theme";
 
 function parseReferenceRange(reference?: string): { min?: number; max?: number } {
@@ -49,25 +51,53 @@ function stateColor(state: "low" | "high" | "normal" | "unknown"): string {
 export default function PatientPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
-  const [search, setSearch] = useState("P0");
+  const [search, setSearch] = useState("patient_");
+  const recentPatients = usePatientStore((state) => state.recentPatients);
+  const addRecentPatient = usePatientStore((state) => state.addRecentPatient);
+  const clearRecentPatients = usePatientStore((state) => state.clearRecentPatients);
 
   const { data: searchResults, isLoading: searchLoading } = usePatientSearch(search, 1, 50);
   const { data: selectedPatient, isLoading: patientLoading } = usePatient(id || "");
 
   const patients = ((searchResults as { patients?: PatientProfile[] } | undefined)?.patients ?? []).slice(0, 30);
   const patient = selectedPatient as PatientProfile | undefined;
+  const patientConditions = Array.isArray(patient?.active_conditions) ? patient.active_conditions : [];
+  const patientMedications = Array.isArray(patient?.active_medications) ? patient.active_medications : [];
+  const patientAllergies = Array.isArray(patient?.allergies) ? patient.allergies : [];
+  const patientLabs = Array.isArray(patient?.recent_labs) ? patient.recent_labs : [];
+  const patientDemographics = patient?.demographics;
+  const patientWeight =
+    typeof patientDemographics?.weight_kg === "number" && patientDemographics.weight_kg > 0
+      ? patientDemographics.weight_kg
+      : "?";
+  const patientHeight =
+    typeof patientDemographics?.height_cm === "number" && patientDemographics.height_cm > 0
+      ? patientDemographics.height_cm
+      : "?";
+
+  useEffect(() => {
+    if (patient) {
+      addRecentPatient(patient);
+    }
+  }, [patient, addRecentPatient]);
+
+  const handleOpenPatient = (candidate: PatientProfile) => {
+    addRecentPatient(candidate);
+    setSearch(candidate.patient_id);
+    navigate(`/patients/${candidate.patient_id}`);
+  };
 
   const latestLabs = useMemo(() => {
-    if (!patient?.recent_labs?.length) return [] as LabResult[];
+    if (!patientLabs.length) return [] as LabResult[];
     const byCode = new Map<string, LabResult>();
-    patient.recent_labs.forEach((lab) => {
+    patientLabs.forEach((lab) => {
       const existing = byCode.get(lab.code);
       if (!existing || new Date(lab.test_date).getTime() > new Date(existing.test_date).getTime()) {
         byCode.set(lab.code, lab);
       }
     });
     return Array.from(byCode.values()).slice(0, 8);
-  }, [patient]);
+  }, [patientLabs]);
 
   return (
     <PageContainer>
@@ -87,9 +117,47 @@ export default function PatientPage() {
                 label="Find Patient"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  const searchValue = search.trim().toLowerCase();
+                  if (!searchValue) return;
+                  const exactMatch = patients.find((candidate) => candidate.patient_id.toLowerCase() === searchValue);
+                  if (!exactMatch) return;
+                  event.preventDefault();
+                  handleOpenPatient(exactMatch);
+                }}
                 placeholder="ID or demographics..."
                 sx={{ mb: 2 }}
               />
+
+              {recentPatients.length > 0 && (
+                <Box sx={{ mb: 2 }}>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+                    <Typography variant="caption" sx={{ fontWeight: 700, textTransform: "uppercase", color: "text.secondary" }}>
+                      Recent Search History
+                    </Typography>
+                    <Button size="small" onClick={clearRecentPatients}>
+                      Clear
+                    </Button>
+                  </Stack>
+                  <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
+                    {recentPatients.map((entry) => (
+                      <Chip
+                        key={entry.id}
+                        size="small"
+                        label={entry.id}
+                        onClick={() => {
+                          setSearch(entry.id);
+                          navigate(`/patients/${entry.id}`);
+                        }}
+                        clickable
+                        variant="outlined"
+                        sx={{ height: 24 }}
+                      />
+                    ))}
+                  </Stack>
+                </Box>
+              )}
 
               {search.length < 2 ? (
                 <Alert severity="info">Type at least 2 characters to search patients.</Alert>
@@ -105,11 +173,15 @@ export default function PatientPage() {
                 <List dense disablePadding sx={{ maxHeight: "70vh", overflow: "auto" }}>
                   {patients.map((candidate) => {
                     const isActive = id === candidate.patient_id;
+                    const demographics = candidate.demographics;
+                    const conditionCount = Array.isArray(candidate.active_conditions) ? candidate.active_conditions.length : 0;
+                    const medicationCount = Array.isArray(candidate.active_medications) ? candidate.active_medications.length : 0;
+                    const allergyCount = Array.isArray(candidate.allergies) ? candidate.allergies.length : 0;
                     return (
                       <ListItemButton
                         key={candidate.patient_id}
                         selected={isActive}
-                        onClick={() => navigate(`/patients/${candidate.patient_id}`)}
+                        onClick={() => handleOpenPatient(candidate)}
                         sx={{
                           mb: 0.6,
                           borderRadius: borderRadius.sm,
@@ -123,8 +195,8 @@ export default function PatientPage() {
                               <Typography variant="body2" sx={{ fontWeight: 700 }}>
                                 {candidate.patient_id}
                               </Typography>
-                              <Chip size="small" label={`${candidate.demographics.age}y`} />
-                              <Chip size="small" label={candidate.demographics.sex} variant="outlined" />
+                              <Chip size="small" label={`${demographics?.age ?? "?"}y`} />
+                              <Chip size="small" label={demographics?.sex ?? "Unknown"} variant="outlined" />
                             </Stack>
                           }
                           secondary={
@@ -132,19 +204,19 @@ export default function PatientPage() {
                               <Chip
                                 size="small"
                                 icon={<Science sx={{ fontSize: 13 }} />}
-                                label={`${candidate.active_conditions.length} cond`}
+                                label={`${conditionCount} cond`}
                                 sx={{ height: 22 }}
                               />
                               <Chip
                                 size="small"
                                 icon={<Medication sx={{ fontSize: 13 }} />}
-                                label={`${candidate.active_medications.length} meds`}
+                                label={`${medicationCount} meds`}
                                 sx={{ height: 22 }}
                               />
                               <Chip
                                 size="small"
                                 icon={<WarningAmber sx={{ fontSize: 13 }} />}
-                                label={`${candidate.allergies.length} allergy`}
+                                label={`${allergyCount} allergy`}
                                 sx={{ height: 22 }}
                               />
                             </Stack>
@@ -204,10 +276,10 @@ export default function PatientPage() {
                       </Typography>
                     </Box>
                     <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                      <Chip label={`${patient.demographics.age} years`} />
-                      <Chip label={patient.demographics.sex} variant="outlined" />
-                      <Chip label={`${patient.demographics.weight_kg} kg`} variant="outlined" />
-                      <Chip label={`${patient.demographics.height_cm} cm`} variant="outlined" />
+                      <Chip label={`${patientDemographics?.age ?? "?"} years`} />
+                      <Chip label={patientDemographics?.sex ?? "Unknown"} variant="outlined" />
+                      <Chip label={`${patientWeight} kg`} variant="outlined" />
+                      <Chip label={`${patientHeight} cm`} variant="outlined" />
                     </Stack>
                   </Stack>
 
@@ -219,12 +291,12 @@ export default function PatientPage() {
                         Conditions
                       </Typography>
                       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                        {patient.active_conditions.length === 0 ? (
+                        {patientConditions.length === 0 ? (
                           <Typography variant="body2" color="text.secondary">
                             No active conditions.
                           </Typography>
                         ) : (
-                          patient.active_conditions.map((condition) => (
+                          patientConditions.map((condition) => (
                             <TooltipChip
                               key={`${condition.code}-${condition.display}`}
                               label={condition.display}
@@ -240,12 +312,12 @@ export default function PatientPage() {
                         Allergies
                       </Typography>
                       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                        {patient.allergies.length === 0 ? (
+                        {patientAllergies.length === 0 ? (
                           <Typography variant="body2" color="text.secondary">
                             No known allergies.
                           </Typography>
                         ) : (
-                          patient.allergies.map((allergy, index) => (
+                          patientAllergies.map((allergy, index) => (
                             <TooltipChip
                               key={`${allergy.substance}-${index}`}
                               label={`${allergy.substance} (${allergy.severity})`}
@@ -260,7 +332,7 @@ export default function PatientPage() {
                 </CardContent>
               </Card>
 
-              <MedicationList medications={patient.active_medications} title="Medication Profile" />
+              <MedicationList medications={patientMedications} title="Medication Profile" />
 
               <Card sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>
                 <CardContent sx={{ p: spacing[4] }}>
@@ -301,7 +373,7 @@ export default function PatientPage() {
                     </Grid>
                   )}
 
-                  <LabResultsChart labResults={patient.recent_labs} title="Lab Trends" />
+                  <LabResultsChart labResults={patientLabs} title="Lab Trends" />
                 </CardContent>
               </Card>
             </Stack>
