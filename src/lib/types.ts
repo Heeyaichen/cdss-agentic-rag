@@ -172,18 +172,21 @@ export interface ProtocolMatch {
 
 export interface AuditLogEntry {
   id: string;
-  date_partition: string;
-  event_type: string;
+  date_partition?: string;
+  event_type?: string;
+  type?: string;
   timestamp: string;
-  actor: Record<string, string>;
-  action: string;
-  resource: Record<string, string>;
-  session_id: string;
-  justification: string;
-  outcome: string;
-  data_sent_to_llm: boolean;
-  phi_fields_sent: string[];
-  phi_fields_redacted: string[];
+  actor?: Record<string, string>;
+  action?: string;
+  resource?: Record<string, string>;
+  session_id?: string;
+  justification?: string;
+  outcome?: string;
+  data_sent_to_llm?: boolean;
+  phi_fields_sent?: string[];
+  phi_fields_redacted?: string[];
+  details?: Record<string, unknown>;
+  patient_id?: string;
 }
 
 // API Response Types
@@ -258,6 +261,14 @@ export interface DocumentSearchVerificationRequest {
   top?: number;
 }
 
+export interface DocumentGroundedPreviewRequest {
+  question: string;
+  top?: number;
+  timeout_seconds?: number;
+  max_tokens?: number;
+  use_cache?: boolean;
+}
+
 export interface DocumentSearchVerificationHit {
   id: string;
   chunk_index?: number;
@@ -278,6 +289,30 @@ export interface DocumentSearchVerificationResponse {
   phrase?: string;
   phrase_hits_count: number;
   phrase_hits: DocumentSearchVerificationHit[];
+}
+
+export interface GroundedPreviewCitation {
+  chunk_id: string;
+  chunk_index?: number;
+  quote: string;
+  score?: number;
+  content_preview?: string;
+}
+
+export interface DocumentGroundedPreviewResponse {
+  document_id: string;
+  pipeline_document_id: string;
+  normalized_document_type: string;
+  workspace_target: string;
+  logical_index_name: string;
+  physical_index_name: string;
+  question: string;
+  retrieved_chunks_count: number;
+  status: "ok" | "no_supporting_evidence";
+  answer: string;
+  confidence: number;
+  citations: GroundedPreviewCitation[];
+  cached: boolean;
 }
 
 export interface DocumentDeleteResponse {

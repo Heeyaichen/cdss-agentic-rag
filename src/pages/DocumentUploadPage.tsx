@@ -27,7 +27,12 @@ import {
 } from "@mui/icons-material";
 import { PageContainer, PageHeader } from "@/components/ui";
 import { clinicalApi } from "@/lib/api-client";
-import type { ApiError, DocumentIngestionStatusResponse, DocumentSearchVerificationResponse } from "@/lib/types";
+import type {
+  ApiError,
+  DocumentGroundedPreviewResponse,
+  DocumentIngestionStatusResponse,
+  DocumentSearchVerificationResponse,
+} from "@/lib/types";
 import { alpha as alphaUtil, borderRadius, componentShadows, semantic, severity, spacing } from "@/theme";
 
 type PipelineStage = "queued" | "uploading" | "parsing" | "indexing" | "completed" | "error";
@@ -221,6 +226,10 @@ export default function DocumentUploadPage() {
   );
   const [verificationErrorById, setVerificationErrorById] = React.useState<Record<string, string>>({});
   const [verifyingById, setVerifyingById] = React.useState<Record<string, boolean>>({});
+  const [groundedQuestionById, setGroundedQuestionById] = React.useState<Record<string, string>>({});
+  const [groundedResultById, setGroundedResultById] = React.useState<Record<string, DocumentGroundedPreviewResponse>>({});
+  const [groundedErrorById, setGroundedErrorById] = React.useState<Record<string, string>>({});
+  const [groundingById, setGroundingById] = React.useState<Record<string, boolean>>({});
   const [deletingById, setDeletingById] = React.useState<Record<string, boolean>>({});
   const isMountedRef = React.useRef(true);
 
@@ -296,6 +305,26 @@ export default function DocumentUploadPage() {
       return next;
     });
     setVerifyingById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setGroundedQuestionById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setGroundedResultById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setGroundedErrorById((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    setGroundingById((prev) => {
       const next = { ...prev };
       delete next[fileId];
       return next;
@@ -493,6 +522,40 @@ export default function DocumentUploadPage() {
     }
   };
 
+  const generateGroundedPreview = async (entry: PipelineFile) => {
+    if (!entry.documentId) return;
+
+    const question = (groundedQuestionById[entry.id] || "").trim();
+    if (!question) {
+      setGroundedErrorById((prev) => ({ ...prev, [entry.id]: "Enter a question to generate grounded answer preview." }));
+      return;
+    }
+
+    setGroundingById((prev) => ({ ...prev, [entry.id]: true }));
+    setGroundedErrorById((prev) => ({ ...prev, [entry.id]: "" }));
+
+    try {
+      const result = await clinicalApi.generateDocumentGroundedPreview(entry.documentId, {
+        question,
+        top: 8,
+        timeout_seconds: 25,
+        max_tokens: 700,
+        use_cache: true,
+      });
+      setGroundedResultById((prev) => ({ ...prev, [entry.id]: result }));
+    } catch (error) {
+      const apiError = error as ApiError | undefined;
+      const detail = apiError?.details as { detail?: unknown } | undefined;
+      const message =
+        (typeof detail?.detail === "string" && detail.detail) ||
+        apiError?.message ||
+        "Grounded preview generation failed.";
+      setGroundedErrorById((prev) => ({ ...prev, [entry.id]: message }));
+    } finally {
+      setGroundingById((prev) => ({ ...prev, [entry.id]: false }));
+    }
+  };
+
   const completedCount = pipelineFiles.filter((entry) => entry.stage === "completed").length;
   const errorCount = pipelineFiles.filter((entry) => entry.stage === "error").length;
   const inFlightCount = pipelineFiles.filter(
@@ -615,6 +678,10 @@ export default function DocumentUploadPage() {
                       setVerificationResultById({});
                       setVerificationErrorById({});
                       setVerifyingById({});
+                      setGroundedQuestionById({});
+                      setGroundedResultById({});
+                      setGroundedErrorById({});
+                      setGroundingById({});
                     }}
                   >
                     Clear Queue
@@ -644,14 +711,24 @@ export default function DocumentUploadPage() {
               const verification = verificationResultById[entry.id];
               const verificationError = verificationErrorById[entry.id];
               const isVerifying = verifyingById[entry.id] === true;
+              const groundedResult = groundedResultById[entry.id];
+              const groundedError = groundedErrorById[entry.id];
+              const isGrounding = groundingById[entry.id] === true;
               const isDeleting = deletingById[entry.id] === true;
               const phraseValue = verificationPhraseById[entry.id] ?? "";
+              const groundedQuestionValue = groundedQuestionById[entry.id] ?? "";
               const defaultPhrase =
                 entry.requestedDocumentType === "protocol"
                   ? "guideline recommendation"
                   : entry.requestedDocumentType === "literature"
                     ? "trial outcome"
                     : "CKD Stage G3a-A2";
+              const defaultGroundedQuestion =
+                entry.requestedDocumentType === "protocol"
+                  ? "What is the protocol recommendation and monitoring plan?"
+                  : entry.requestedDocumentType === "literature"
+                    ? "Summarize the key evidence and outcomes from this document."
+                    : "Summarize this patient context and key clinical concerns.";
 
               return (
                 <Card key={entry.id} sx={{ borderRadius: borderRadius.md, boxShadow: componentShadows.card }}>
@@ -805,6 +882,27 @@ export default function DocumentUploadPage() {
                             </Button>
                           </Stack>
 
+                          <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                            <TextField
+                              size="small"
+                              label="Grounded answer question"
+                              placeholder={defaultGroundedQuestion}
+                              value={groundedQuestionValue}
+                              onChange={(event) =>
+                                setGroundedQuestionById((prev) => ({ ...prev, [entry.id]: event.target.value }))
+                              }
+                              fullWidth
+                            />
+                            <Button
+                              variant="contained"
+                              color="secondary"
+                              onClick={() => void generateGroundedPreview(entry)}
+                              disabled={isGrounding || isDeleting}
+                            >
+                              {isGrounding ? "Generating..." : "Generate Grounded Answer"}
+                            </Button>
+                          </Stack>
+
                           {verificationError && (
                             <Alert severity="error" sx={{ borderRadius: borderRadius.sm }}>
                               {verificationError}
@@ -824,6 +922,34 @@ export default function DocumentUploadPage() {
                                 <Typography variant="body2">
                                   Phrase hits: <strong>{verification.phrase_hits_count}</strong>
                                   {verification.phrase ? ` for "${verification.phrase}"` : " (no phrase provided)"}
+                                </Typography>
+                              </Stack>
+                            </Alert>
+                          )}
+
+                          {groundedError && (
+                            <Alert severity="error" sx={{ borderRadius: borderRadius.sm }}>
+                              {groundedError}
+                            </Alert>
+                          )}
+
+                          {groundedResult && (
+                            <Alert
+                              severity={groundedResult.status === "ok" ? "success" : "warning"}
+                              sx={{ borderRadius: borderRadius.sm }}
+                            >
+                              <Stack spacing={0.7}>
+                                <Typography variant="body2">
+                                  Grounded status: <strong>{groundedResult.status}</strong>
+                                  {groundedResult.cached ? " (cached)" : ""}
+                                </Typography>
+                                <Typography variant="body2">
+                                  Retrieved chunks: <strong>{groundedResult.retrieved_chunks_count}</strong> | Citations:{" "}
+                                  <strong>{groundedResult.citations.length}</strong> | Confidence:{" "}
+                                  <strong>{groundedResult.confidence.toFixed(2)}</strong>
+                                </Typography>
+                                <Typography variant="body2">
+                                  {groundedResult.answer}
                                 </Typography>
                               </Stack>
                             </Alert>

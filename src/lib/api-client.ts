@@ -5,6 +5,8 @@ import {
   ApiError,
   ClinicalResponse,
   DocumentDeleteResponse,
+  DocumentGroundedPreviewRequest,
+  DocumentGroundedPreviewResponse,
   DocumentIngestResponse,
   DocumentIngestionStatusResponse,
   DocumentSearchVerificationRequest,
@@ -162,6 +164,16 @@ export const clinicalApi = {
     payload: DocumentSearchVerificationRequest
   ): Promise<DocumentSearchVerificationResponse> => {
     return apiClient.post<DocumentSearchVerificationResponse>(`/v1/documents/${documentId}/verify`, payload);
+  },
+
+  generateDocumentGroundedPreview: async (
+    documentId: string,
+    payload: DocumentGroundedPreviewRequest
+  ): Promise<DocumentGroundedPreviewResponse> => {
+    return apiClient.post<DocumentGroundedPreviewResponse>(
+      `/v1/documents/${documentId}/grounded-preview`,
+      payload
+    );
   },
 
   deleteDocument: async (documentId: string): Promise<DocumentDeleteResponse> => {

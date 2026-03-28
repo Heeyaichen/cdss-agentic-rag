@@ -79,6 +79,8 @@ export default function CitationCard({
       onChange={(_, isExpanded) => setExpanded(isExpanded)}
       sx={{
         mb: 1,
+        width: '100%',
+        overflow: 'hidden',
         borderRadius: 2,
         border: '1px solid',
         borderColor: 'divider',
@@ -98,8 +100,17 @@ export default function CitationCard({
         id={`citation-${citation.identifier}-header`}
         sx={{
           px: 2,
-          minHeight: 48,
+          minHeight: 56,
+          alignItems: 'flex-start',
           backgroundColor: 'background.paper',
+          '& .MuiAccordionSummary-content': {
+            my: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+          },
+          '& .MuiAccordionSummary-content.Mui-expanded': {
+            my: 1,
+          },
           '&:hover': {
             backgroundColor: 'action.hover',
           },
@@ -125,14 +136,18 @@ export default function CitationCard({
               variant="body2"
               sx={{
                 fontWeight: 500,
+                lineHeight: 1.35,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
+                wordBreak: 'break-word',
               }}
             >
               {citation.title}
             </Typography>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
               <Chip
                 label={sourceConfig.label}
                 size="small"
@@ -164,11 +179,11 @@ export default function CitationCard({
         }}
       >
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
             <Typography variant="caption" color="text.secondary">
               Identifier:
             </Typography>
-            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+            <Typography variant="body2" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
               {formatIdentifier()}
             </Typography>
           </Box>

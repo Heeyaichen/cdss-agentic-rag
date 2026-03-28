@@ -337,6 +337,70 @@ export const handlers = [
     });
   }),
 
+  // Grounded answer preview
+  http.post(`${API_BASE}/documents/:documentId/grounded-preview`, async ({ params, request }) => {
+    await delay(500);
+    const documentId = String(params.documentId);
+    const current = mockIngestionJobs.get(documentId);
+
+    if (!current) {
+      return HttpResponse.json({ detail: `Document '${documentId}' not found.` }, { status: 404 });
+    }
+
+    const body = (await request.json()) as {
+      question?: string;
+      top?: number;
+    };
+    const question = String(body?.question || "").trim();
+    const top = Math.max(1, Math.min(20, Number(body?.top || 8)));
+    if (!question) {
+      return HttpResponse.json({ detail: "question must not be empty." }, { status: 422 });
+    }
+
+    const indexMap: Record<string, { logical: string; physical: string; workspace: string }> = {
+      generic: {
+        logical: "patient_records",
+        physical: "patient-records",
+        workspace: "query_patient_context",
+      },
+      clinical_guideline: {
+        logical: "treatment_protocols",
+        physical: "treatment-protocols",
+        workspace: "protocol",
+      },
+      pubmed_abstract: {
+        logical: "medical_literature",
+        physical: "medical-literature-cache",
+        workspace: "literature",
+      },
+    };
+    const resolved = indexMap[current.normalized_document_type] || indexMap.generic;
+
+    const citations = Array.from({ length: Math.min(top, 2) }, (_, idx) => ({
+      chunk_id: `${current.pipeline_document_id}-chunk-${idx + 1}`,
+      chunk_index: idx + 1,
+      quote: `Mock quote ${idx + 1} for '${question}'.`,
+      score: Math.max(0.25, 1 - idx * 0.1),
+      content_preview: `Mock content preview ${idx + 1} from ${current.filename}.`,
+    }));
+
+    return HttpResponse.json({
+      document_id: current.document_id,
+      pipeline_document_id: current.pipeline_document_id,
+      normalized_document_type: current.normalized_document_type,
+      workspace_target: resolved.workspace,
+      logical_index_name: resolved.logical,
+      physical_index_name: resolved.physical,
+      question,
+      retrieved_chunks_count: Math.min(top, 4),
+      status: "ok",
+      answer: `Mock grounded answer generated for '${question}'.`,
+      confidence: 0.82,
+      citations,
+      cached: false,
+    });
+  }),
+
   // Document delete
   http.delete(`${API_BASE}/documents/:documentId`, async ({ params }) => {
     await delay(300);
@@ -382,7 +446,7 @@ export const handlers = [
     
     let filtered = mockAuditLog;
     if (eventType) {
-      filtered = mockAuditLog.filter(e => e.event_type.includes(eventType));
+      filtered = mockAuditLog.filter((e) => (e.event_type || e.type || "").includes(eventType));
     }
     
     return HttpResponse.json(filtered);

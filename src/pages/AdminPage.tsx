@@ -128,11 +128,11 @@ export default function AdminPage() {
     const rows = filteredEntries.map((entry) =>
       [
         entry.timestamp,
-        entry.event_type,
+        entry.event_type || entry.type || "",
         entry.actor?.clinician_id ?? "",
-        entry.action,
+        entry.action || "",
         entry.resource?.type ?? "",
-        entry.outcome,
+        entry.outcome || "",
         String(Boolean(entry.data_sent_to_llm)),
       ]
         .map((value) => csvEscape(value))
@@ -354,7 +354,11 @@ export default function AdminPage() {
                           <TableCell sx={{ py: rowPaddingY }}>{entry.action || "N/A"}</TableCell>
                           <TableCell sx={{ py: rowPaddingY }}>{entry.resource?.type || "N/A"}</TableCell>
                           <TableCell sx={{ py: rowPaddingY }}>
-                            <Chip size="small" color={outcomeColor(entry.outcome)} label={entry.outcome || "unknown"} />
+                            <Chip
+                              size="small"
+                              color={outcomeColor(entry.outcome || "unknown")}
+                              label={entry.outcome || "unknown"}
+                            />
                           </TableCell>
                           <TableCell sx={{ py: rowPaddingY }}>
                             <Chip
