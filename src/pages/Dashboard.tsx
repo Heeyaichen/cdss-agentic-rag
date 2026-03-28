@@ -181,6 +181,32 @@ function formatEventTypeLabel(eventType: string): string {
   return eventType.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function getAuditEventType(entry: AuditLogEntry): string {
+  return String(entry.event_type || entry.type || "unknown").toLowerCase();
+}
+
+function getAuditActionLabel(entry: AuditLogEntry): string {
+  const value = String(entry.action || getAuditEventType(entry) || "event");
+  return value.replace(/_/g, " ");
+}
+
+function isQueryTelemetryEvent(entry: AuditLogEntry): boolean {
+  const eventType = getAuditEventType(entry);
+  const resourceType = String(entry.resource?.type || "").toLowerCase();
+  return (
+    eventType.includes("query") ||
+    eventType.includes("llm") ||
+    resourceType.includes("query") ||
+    resourceType.includes("clinical_query")
+  );
+}
+
+function getNumericDetail(details: Record<string, unknown> | undefined, key: string): number {
+  const raw = details?.[key];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function getEventIcon(eventType: string) {
   if (eventType.includes("drug")) return <Medication fontSize="small" />;
   if (eventType.includes("document")) return <Description fontSize="small" />;
@@ -306,17 +332,19 @@ export default function Dashboard() {
   const compact = densityMode === "compact";
   const density = compact ? densityTokens.compact : densityTokens.comfortable;
   const auditEntries = React.useMemo(() => normalizeAuditEntries(rawAuditData), [rawAuditData]);
+  const queryEntries = React.useMemo(() => auditEntries.filter((entry) => isQueryTelemetryEvent(entry)), [auditEntries]);
+
   const trendData: TrendPoint[] = React.useMemo(() => {
-    if (auditEntries.length === 0) return [];
+    if (queryEntries.length === 0) return [];
 
     const baseDays = Array.from({ length: 7 }).map((_, index) => dayjs().subtract(6 - index, "day").format("MMM D"));
     const seedMap = new Map(baseDays.map((day) => [day, { day, success: 0, failure: 0 }]));
 
-    auditEntries.forEach((entry) => {
+    queryEntries.forEach((entry) => {
       const dayKey = dayjs(entry.timestamp).format("MMM D");
       const dayData = seedMap.get(dayKey);
       if (!dayData) return;
-      if (entry.outcome === "success") {
+      if ((entry.outcome || "success") === "success") {
         dayData.success += 1;
       } else {
         dayData.failure += 1;
@@ -324,7 +352,7 @@ export default function Dashboard() {
     });
 
     return Array.from(seedMap.values());
-  }, [auditEntries]);
+  }, [queryEntries]);
 
   if (patientsLoading || healthLoading || auditLoading) {
     return <LoadingBlock compact={compact} />;
@@ -341,34 +369,43 @@ export default function Dashboard() {
     .slice(0, compact ? 8 : 6)
     .map((entry) => ({
       id: entry.id,
-      eventType: entry.event_type,
-      description: entry.action.replace(/_/g, " "),
+      eventType: getAuditEventType(entry),
+      description: getAuditActionLabel(entry),
       timestamp: entry.timestamp,
-      outcome: mapOutcome(entry.outcome),
+      outcome: mapOutcome(entry.outcome || "warning"),
     }));
 
   const today = dayjs().format("YYYY-MM-DD");
-  const queriesToday = auditEntries.filter((entry) => {
+  const queriesToday = queryEntries.filter((entry) => {
     const isToday = dayjs(entry.timestamp).format("YYYY-MM-DD") === today;
-    const isQueryEvent =
-      entry.event_type.includes("llm") || entry.event_type.includes("query") || entry.resource?.type === "query";
-    return isToday && isQueryEvent;
+    return isToday;
   }).length;
 
   const majorDrugAlerts: SafetyItem[] = auditEntries
-    .filter((entry) => entry.event_type.includes("drug") || entry.action.includes("drug"))
-    .filter((entry) => entry.outcome !== "success" || entry.event_type.includes("interaction"))
+    .filter((entry) => {
+      const eventType = getAuditEventType(entry);
+      const action = String(entry.action || "").toLowerCase();
+      return eventType.includes("drug") || action.includes("drug");
+    })
+    .filter((entry) => {
+      const details = (entry.details || {}) as Record<string, unknown>;
+      const majorInteractions = getNumericDetail(details, "major_interactions");
+      return (entry.outcome || "success") !== "success" || majorInteractions > 0;
+    })
     .slice(0, 4)
     .map((entry) => ({
       id: entry.id,
       title: "Major drug alert",
-      details: `${entry.action.replace(/_/g, " ")} (${entry.actor?.clinician_id ?? "unknown actor"})`,
+      details: `${getAuditActionLabel(entry)} (${entry.actor?.clinician_id ?? "unknown actor"})`,
       timestamp: entry.timestamp,
     }));
 
   const unresolvedGuardrailFlags: SafetyItem[] = auditEntries
-    .filter((entry) => entry.event_type.includes("llm"))
-    .filter((entry) => entry.outcome !== "success")
+    .filter((entry) => {
+      const eventType = getAuditEventType(entry);
+      return eventType.includes("guardrail") || isQueryTelemetryEvent(entry);
+    })
+    .filter((entry) => (entry.outcome || "success") !== "success")
     .slice(0, 4)
     .map((entry) => ({
       id: `${entry.id}-guardrail`,
@@ -412,10 +449,38 @@ export default function Dashboard() {
   ];
 
   const degradedCount = serviceEntries.filter(([, status]) => status !== "healthy").length;
-  const agentLatencyData: AgentLatencyPoint[] = FALLBACK_AGENT_BASELINES.map((agent, index) => ({
-    agent: agent.agent,
-    latency: agent.latency + degradedCount * 45 + (compact ? -20 : 0) + index * 8,
-  }));
+  const agentLatencyData: AgentLatencyPoint[] = React.useMemo(() => {
+    const latencyBuckets = new Map<string, number[]>();
+    queryEntries.forEach((entry) => {
+      const details = (entry.details || {}) as Record<string, unknown>;
+      const latencies = details.agent_latencies;
+      if (!latencies || typeof latencies !== "object") return;
+      Object.entries(latencies as Record<string, unknown>).forEach(([key, value]) => {
+        const ms = Number(value);
+        if (!Number.isFinite(ms) || ms <= 0) return;
+        const bucketKey = key.toLowerCase();
+        const existing = latencyBuckets.get(bucketKey) || [];
+        existing.push(ms);
+        latencyBuckets.set(bucketKey, existing);
+      });
+    });
+
+    return FALLBACK_AGENT_BASELINES.map((agent, index) => {
+      const bucketKey = agent.agent.toLowerCase().replace(/\s+/g, "_");
+      const candidates =
+        latencyBuckets.get(bucketKey) ||
+        latencyBuckets.get(agent.agent.toLowerCase()) ||
+        [];
+      if (candidates.length > 0) {
+        const avg = Math.round(candidates.reduce((sum, item) => sum + item, 0) / candidates.length);
+        return { agent: agent.agent, latency: avg };
+      }
+      return {
+        agent: agent.agent,
+        latency: agent.latency + degradedCount * 45 + (compact ? -20 : 0) + index * 8,
+      };
+    });
+  }, [compact, degradedCount, queryEntries]);
 
   return (
     <Box
