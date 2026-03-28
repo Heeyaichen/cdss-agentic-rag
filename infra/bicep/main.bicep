@@ -847,7 +847,7 @@ resource embeddingCacheContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatab
         vectorEmbeddings: [
           {
             path: '/content_vector'
-            dataType: 'float16'
+            dataType: 'float32'
             dimensions: 3072
             distanceFunction: 'cosine'
           }
