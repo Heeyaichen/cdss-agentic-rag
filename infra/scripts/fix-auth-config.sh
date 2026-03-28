@@ -14,6 +14,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIN_TRAFFIC_SCRIPT="${SCRIPT_DIR}/pin-containerapp-latest-ready.sh"
 DRY_RUN="false"
 RESOURCE_GROUP=""
 CONTAINER_APP_NAME=""
@@ -319,6 +321,14 @@ if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
         --only-show-errors \
         --output none; then
         log_success "Environment variables updated"
+        if [[ -x "${PIN_TRAFFIC_SCRIPT}" ]]; then
+            if ! "${PIN_TRAFFIC_SCRIPT}" "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}"; then
+                log_warn "Auth settings updated, but failed to pin traffic to latest ready revision."
+                log_warn "Run manually: ${PIN_TRAFFIC_SCRIPT} ${RESOURCE_GROUP} ${CONTAINER_APP_NAME}"
+            fi
+        else
+            log_warn "Traffic pin script not found/executable: ${PIN_TRAFFIC_SCRIPT}"
+        fi
     else
         log_error "Failed to update environment variables"
         exit 1

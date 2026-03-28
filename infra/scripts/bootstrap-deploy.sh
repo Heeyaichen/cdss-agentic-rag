@@ -19,11 +19,13 @@ if [[ -z "${ENVIRONMENT}" || -z "${RESOURCE_GROUP}" ]]; then
   echo "  CONTAINER_IMAGE=<acr>.azurecr.io/cdss-api:<tag>"
   echo "  PROD_PUBLIC_API=true|false (default: true)"
   echo "  SKIP_IMAGE_BUILD=true|false (default: false)"
+  echo "  CDSS_IMAGE_BUILD_MODE=auto|local|acr (default: auto)"
   echo "  SKIP_SEARCH_BOOTSTRAP=true|false (default: false)"
   echo "  SKIP_AUTH_SETUP=true|false (default: true)"
   echo "  CDSS_PUBMED_API_KEY=<pubmed-api-key> (optional, prod recommended)"
   echo "  CDSS_PUBMED_EMAIL=<email@example.com> (optional, prod recommended)"
   echo "  CDSS_KV_TEMP_IP_ALLOWLIST=true|false (default: true)"
+  echo "  CDSS_OPENAI_NETWORK_AUTOFIX=true|false (default: true)"
   exit 1
 fi
 
@@ -38,9 +40,12 @@ INDEX_SCRIPT="${SCRIPT_DIR}/create-search-indexes.sh"
 AUTH_SCRIPT="${SCRIPT_DIR}/setup-entra-spa-auth.sh"
 POPULATE_ENV_SCRIPT="${SCRIPT_DIR}/populate-env.sh"
 PUBMED_CONFIG_SCRIPT="${SCRIPT_DIR}/configure-pubmed-prod.sh"
+OPENAI_ACCESS_SCRIPT="${SCRIPT_DIR}/ensure-openai-runtime-access.sh"
+COSMOS_EMBEDDING_POLICY_SCRIPT="${SCRIPT_DIR}/ensure-cosmos-embedding-cache-policy.sh"
 
 PROD_PUBLIC_API="${PROD_PUBLIC_API:-true}"
 SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-false}"
+CDSS_IMAGE_BUILD_MODE="${CDSS_IMAGE_BUILD_MODE:-auto}"
 SKIP_SEARCH_BOOTSTRAP="${SKIP_SEARCH_BOOTSTRAP:-false}"
 SKIP_AUTH_SETUP="${SKIP_AUTH_SETUP:-true}"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y.%m.%d.%H%M%S)}"
@@ -313,8 +318,21 @@ PY
 }
 
 require_cmd az
-require_cmd docker
 require_cmd bash
+
+normalize_build_mode() {
+  local mode="$1"
+  mode="$(echo "${mode}" | tr '[:upper:]' '[:lower:]')"
+  case "${mode}" in
+    auto|local|acr)
+      echo "${mode}"
+      ;;
+    *)
+      log_error "Invalid CDSS_IMAGE_BUILD_MODE='${mode}'. Expected one of: auto, local, acr."
+      exit 1
+      ;;
+  esac
+}
 
 if ! az account show >/dev/null 2>&1; then
   log_error "Not logged in to Azure CLI. Run: az login"
@@ -340,17 +358,38 @@ if [[ -z "${CONTAINER_IMAGE}" ]]; then
   fi
 
   CONTAINER_IMAGE="${ACR_NAME}.azurecr.io/cdss-api:${IMAGE_TAG}"
+  BUILD_MODE="$(normalize_build_mode "${CDSS_IMAGE_BUILD_MODE}")"
 
   if [[ "${SKIP_IMAGE_BUILD}" != "true" ]]; then
-    log_info "Logging in to ACR: ${ACR_NAME}"
-    az acr login -n "${ACR_NAME}" --output none
+    if [[ "${BUILD_MODE}" == "auto" ]]; then
+      if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        BUILD_MODE="local"
+      else
+        BUILD_MODE="acr"
+      fi
+    fi
 
-    log_info "Preparing docker buildx builder"
-    docker buildx create --name cdssbuilder --use >/dev/null 2>&1 || docker buildx use cdssbuilder >/dev/null
-    docker buildx inspect --bootstrap >/dev/null
+    if [[ "${BUILD_MODE}" == "local" ]]; then
+      require_cmd docker
+      log_info "Image build mode: local docker buildx"
+      log_info "Logging in to ACR: ${ACR_NAME}"
+      az acr login -n "${ACR_NAME}" --output none
 
-    log_info "Building and pushing backend image: ${CONTAINER_IMAGE}"
-    docker buildx build --platform linux/amd64 -t "${CONTAINER_IMAGE}" --push .
+      log_info "Preparing docker buildx builder"
+      docker buildx create --name cdssbuilder --use >/dev/null 2>&1 || docker buildx use cdssbuilder >/dev/null
+      docker buildx inspect --bootstrap >/dev/null
+
+      log_info "Building and pushing backend image: ${CONTAINER_IMAGE}"
+      docker buildx build --platform linux/amd64 -t "${CONTAINER_IMAGE}" --push .
+    else
+      log_info "Image build mode: ACR cloud build"
+      log_info "Building and pushing backend image in ACR: ${CONTAINER_IMAGE}"
+      az acr build \
+        --registry "${ACR_NAME}" \
+        --image "cdss-api:${IMAGE_TAG}" \
+        --platform linux/amd64 \
+        .
+    fi
   else
     log_warn "SKIP_IMAGE_BUILD=true, expecting image already exists: ${CONTAINER_IMAGE}"
   fi
@@ -370,6 +409,27 @@ log_info "Deploying infrastructure and app via deploy.sh"
 CONTAINER_IMAGE="${CONTAINER_IMAGE}" \
 ACR_NAME="${ACR_NAME}" \
 "${DEPLOY_SCRIPT}" "${ENVIRONMENT}" "${RESOURCE_GROUP}" "${LOCATION}" "${PROD_PUBLIC_API}"
+
+if [[ -x "${COSMOS_EMBEDDING_POLICY_SCRIPT}" ]]; then
+  log_stage "Cosmos Embedding Cache Policy"
+  if ! "${COSMOS_EMBEDDING_POLICY_SCRIPT}" "${RESOURCE_GROUP}"; then
+    log_error "Cosmos embedding cache policy stage failed."
+    exit 1
+  fi
+else
+  log_warn "Cosmos embedding policy script not found/executable: ${COSMOS_EMBEDDING_POLICY_SCRIPT}"
+fi
+
+if [[ -x "${OPENAI_ACCESS_SCRIPT}" ]]; then
+  log_stage "OpenAI Runtime Connectivity"
+  if ! "${OPENAI_ACCESS_SCRIPT}" "${RESOURCE_GROUP}"; then
+    log_error "OpenAI runtime connectivity stage failed."
+    log_error "If your runtime has private-link-only access configured and verified, set CDSS_OPENAI_NETWORK_AUTOFIX=false."
+    exit 1
+  fi
+else
+  log_warn "OpenAI connectivity script not found/executable: ${OPENAI_ACCESS_SCRIPT}"
+fi
 
 if [[ "${SKIP_SEARCH_BOOTSTRAP}" != "true" ]]; then
   log_stage "Search Bootstrap"

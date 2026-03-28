@@ -111,11 +111,13 @@ BICEP_DIR="${SCRIPT_DIR}/../bicep"
 BICEP_FILE="${BICEP_DIR}/main.bicep"
 PARAMS_FILE="${BICEP_DIR}/parameters.${ENVIRONMENT}.json"
 CREATE_INDEX_SCRIPT="${SCRIPT_DIR}/create-search-indexes.sh"
+PIN_TRAFFIC_SCRIPT="${SCRIPT_DIR}/pin-containerapp-latest-ready.sh"
 DEPLOYMENT_NAME="cdss-${ENVIRONMENT}-$(date +%Y%m%d%H%M%S)"
 EXTRA_BICEP_PARAMS=""
 OPENAI_RESTORE_ENABLED="false"
 DOCINTEL_RESTORE_ENABLED="false"
 MAX_DEPLOY_RETRIES="${MAX_DEPLOY_RETRIES:-3}"
+CDSS_PIN_LATEST_READY_TRAFFIC="${CDSS_PIN_LATEST_READY_TRAFFIC:-true}"
 
 get_deployment_output() {
     local output_name="$1"
@@ -768,6 +770,25 @@ if [[ "${ENVIRONMENT}" == "prod" ]]; then
         exit 1
     fi
     log_success "Production private networking validation passed."
+fi
+
+if [[ "${CDSS_PIN_LATEST_READY_TRAFFIC}" == "true" ]]; then
+    APP_NAME_FOR_TRAFFIC="$(az containerapp list -g "${RESOURCE_GROUP}" --query "[?contains(name,'-api')].name | [0]" -o tsv 2>/dev/null || true)"
+    if [[ -n "${APP_NAME_FOR_TRAFFIC}" ]]; then
+        if [[ -x "${PIN_TRAFFIC_SCRIPT}" ]]; then
+            log_info "Ensuring backend traffic is pinned to latest ready revision..."
+            if ! "${PIN_TRAFFIC_SCRIPT}" "${RESOURCE_GROUP}" "${APP_NAME_FOR_TRAFFIC}"; then
+                log_warn "Could not pin traffic to latest ready revision automatically."
+                log_warn "Run manually: ${PIN_TRAFFIC_SCRIPT} ${RESOURCE_GROUP} ${APP_NAME_FOR_TRAFFIC}"
+            fi
+        else
+            log_warn "Traffic pin script not found/executable: ${PIN_TRAFFIC_SCRIPT}"
+        fi
+    else
+        log_warn "Could not resolve backend Container App name for traffic pinning."
+    fi
+else
+    log_info "Skipping traffic pin to latest ready revision (CDSS_PIN_LATEST_READY_TRAFFIC=false)."
 fi
 
 echo ""

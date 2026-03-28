@@ -12,6 +12,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIN_TRAFFIC_SCRIPT="${SCRIPT_DIR}/pin-containerapp-latest-ready.sh"
+
 RESOURCE_GROUP="${1:-}"
 CONTAINER_APP_NAME="${2:-}"
 KEY_VAULT_NAME="${3:-}"
@@ -280,6 +283,15 @@ az containerapp update \
     "CDSS_PUBMED_BASE_URL=${PUBMED_BASE_URL}" \
   --only-show-errors \
   --output none
+
+if [[ -x "${PIN_TRAFFIC_SCRIPT}" ]]; then
+  if ! "${PIN_TRAFFIC_SCRIPT}" "${RESOURCE_GROUP}" "${CONTAINER_APP_NAME}"; then
+    log_warn "PubMed env updated, but failed to pin traffic to latest ready revision."
+    log_warn "Run manually: ${PIN_TRAFFIC_SCRIPT} ${RESOURCE_GROUP} ${CONTAINER_APP_NAME}"
+  fi
+else
+  log_warn "Traffic pin script not found/executable: ${PIN_TRAFFIC_SCRIPT}"
+fi
 
 log_success "PubMed production configuration applied."
 

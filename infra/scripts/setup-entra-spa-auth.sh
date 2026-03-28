@@ -33,6 +33,7 @@ set -euo pipefail
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PIN_TRAFFIC_SCRIPT="${SCRIPT_DIR}/pin-containerapp-latest-ready.sh"
 
 SPA_APP_ID=""
 SPA_APP_DISPLAY_NAME="cdss-frontend-spa"
@@ -174,6 +175,14 @@ sync_backend_auth_audience() {
         --only-show-errors \
         --output none; then
         log_success "Backend auth audience updated."
+        if [[ -x "${PIN_TRAFFIC_SCRIPT}" ]]; then
+            if ! "${PIN_TRAFFIC_SCRIPT}" "${rg}" "${app}"; then
+                log_warn "Audience updated, but failed to pin traffic to latest ready revision."
+                log_warn "Run manually: ${PIN_TRAFFIC_SCRIPT} ${rg} ${app}"
+            fi
+        else
+            log_warn "Traffic pin script not found/executable: ${PIN_TRAFFIC_SCRIPT}"
+        fi
     else
         log_warn "Could not update backend auth audience automatically. Update CDSS_AUTH_AUDIENCE manually."
     fi
