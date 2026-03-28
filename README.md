@@ -252,6 +252,7 @@ cdss-agentic-rag-main/                  # Repository root
 │       ├── setup-entra-spa-auth.sh     # Entra SPA/API app registration alignment
 │       ├── fix-auth-config.sh          # Auth audience mismatch diagnosis/fix
 │       ├── configure-pubmed-prod.sh    # PubMed Key Vault + runtime secret wiring
+│       ├── ensure-openai-runtime-access.sh # OpenAI network accessibility guard for runtime calls
 │       ├── create-search-indexes.sh    # Idempotent Azure AI Search index setup
 │       ├── seed-data-infra-network.sh  # In-network data seeding execution
 │       ├── seed-data.sh                # Legacy/local seeding script
@@ -355,9 +356,14 @@ test -n "$CDSS_PUBMED_API_KEY" && test -n "$CDSS_PUBMED_EMAIL" && echo "PubMed v
 # after RBAC preflight so this runbook succeeds cleanly end-to-end.
 env -u CDSS_PUBMED_API_KEY -u CDSS_PUBMED_EMAIL \
   ./infra/scripts/bootstrap-deploy.sh "$ENV" "$RG" "$LOCATION"
+
+# Optional: strict private-link mode only (skip automatic OpenAI network remediation)
+# env -u CDSS_PUBMED_API_KEY -u CDSS_PUBMED_EMAIL \
+#   CDSS_OPENAI_NETWORK_AUTOFIX=false ./infra/scripts/bootstrap-deploy.sh "$ENV" "$RG" "$LOCATION"
 ```
 
 `bootstrap-deploy.sh` now performs idempotent Search bootstrap checks and skips costly Search public network toggles when index bootstrap is already complete.
+It also runs `infra/scripts/ensure-openai-runtime-access.sh` by default to prevent OpenAI `403 Traffic is not from an approved private endpoint` runtime blockers.
 
 ## 6) Resolve deployed resource names
 
@@ -385,7 +391,7 @@ Use manual RBAC commands only if your account cannot create role assignments (mi
 curl -i "https://${API_FQDN}/api/v1/health"
 
 az cognitiveservices account show -g "$RG" -n "$OPENAI_NAME" \
-  --query "{state:properties.provisioningState,pna:properties.publicNetworkAccess}" -o table
+  --query "{state:properties.provisioningState,pna:properties.publicNetworkAccess,defaultAction:properties.networkAcls.defaultAction}" -o table
 
 az cognitiveservices account show -g "$RG" -n "$DOCINTEL_NAME" \
   --query "{state:properties.provisioningState,pna:properties.publicNetworkAccess}" -o table
@@ -399,6 +405,7 @@ az containerapp show -g "$RG" -n "$APP" \
 ```
 
 ## 8) Optional recovery: ensure Azure AI Search indexes exist (only if step 4 failed before Search bootstrap completed)
+
 # requires: RG is already exported
 
 ```bash
