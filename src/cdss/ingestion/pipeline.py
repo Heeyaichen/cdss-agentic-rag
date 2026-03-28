@@ -256,6 +256,14 @@ class DocumentIngestionPipeline:
             "Document %s status: %s - %s", document_id, status.value, details or ""
         )
 
+    def _resolve_index_for_document_type(self, document_type: str) -> str:
+        """Resolve the target Azure Search index for a document type."""
+        if document_type == DocumentType.CLINICAL_GUIDELINE.value:
+            return self._protocols_index
+        if document_type == DocumentType.PUBMED_ABSTRACT.value:
+            return self._literature_index
+        return self._default_search_index
+
     async def ingest_document(
         self,
         document_bytes: bytes,
@@ -346,7 +354,8 @@ class DocumentIngestionPipeline:
                 IngestionStatus.INDEXING,
                 f"Indexing {len(chunks)} chunks in AI Search",
             )
-            index_result = await self._index_chunks(chunks, self._default_search_index)
+            target_index = self._resolve_index_for_document_type(doc_type_enum.value)
+            index_result = await self._index_chunks(chunks, target_index)
 
             # Step 7: Store embeddings in Cosmos DB
             self._update_status(
@@ -675,6 +684,19 @@ class DocumentIngestionPipeline:
 
         if self.blob_client is not None:
             try:
+                if hasattr(self.blob_client, "upload_protocol"):
+                    blob_url = await self.blob_client.upload_protocol(
+                        blob_name=blob_name,
+                        content=document_bytes,
+                        metadata=sanitized_metadata,
+                    )
+                    logger.info(
+                        "Uploaded document %s to blob via BlobStorageClient wrapper: %s",
+                        document_id,
+                        blob_url,
+                    )
+                    return blob_url
+
                 container_client = self.blob_client.get_container_client(
                     self._blob_container
                 )
@@ -714,12 +736,35 @@ class DocumentIngestionPipeline:
         """
         if self.doc_intelligence_client is not None:
             try:
-                poller = await self.doc_intelligence_client.begin_analyze_document(
-                    model_id="prebuilt-layout",
-                    document=io.BytesIO(document_bytes),
-                    content_type="application/pdf",
-                )
-                result = await poller.result()
+                if hasattr(self.doc_intelligence_client, "analyze_document"):
+                    analysis_result = await self.doc_intelligence_client.analyze_document(
+                        document_bytes=document_bytes,
+                        model_id="prebuilt-layout",
+                    )
+                    return {
+                        "content": analysis_result.get("content", ""),
+                        "tables": analysis_result.get("tables", []),
+                        "key_value_pairs": analysis_result.get("key_value_pairs", []),
+                        "page_count": len(analysis_result.get("pages", [])),
+                    }
+
+                begin_call = None
+                try:
+                    begin_call = self.doc_intelligence_client.begin_analyze_document(
+                        model_id="prebuilt-layout",
+                        body=document_bytes,
+                        content_type="application/pdf",
+                    )
+                except TypeError:
+                    begin_call = self.doc_intelligence_client.begin_analyze_document(
+                        model_id="prebuilt-layout",
+                        document=io.BytesIO(document_bytes),
+                        content_type="application/pdf",
+                    )
+
+                poller = await begin_call if asyncio.iscoroutine(begin_call) else begin_call
+                result_call = poller.result()
+                result = await result_call if asyncio.iscoroutine(result_call) else result_call
 
                 content = result.content if result.content else ""
 
@@ -1099,6 +1144,12 @@ class DocumentIngestionPipeline:
         """Generate embedding vector for a text chunk."""
         if self.embedding_service is not None:
             try:
+                if hasattr(self.embedding_service, "generate_embedding"):
+                    return await self.embedding_service.generate_embedding(
+                        text=text,
+                        dimensions=self._embedding_dimensions,
+                    )
+
                 response = await self.embedding_service.embeddings.create(
                     input=text,
                     model=self._embedding_model,
@@ -1182,12 +1233,19 @@ class DocumentIngestionPipeline:
 
                         index_docs.append(doc)
 
-                    result = await self.search_client.upload_documents(
-                        documents=index_docs
-                    )
-
-                    succeeded = sum(1 for r in result if r.succeeded)
-                    failed = sum(1 for r in result if not r.succeeded)
+                    if hasattr(self.search_client, "index_documents_batch"):
+                        result_summary = await self.search_client.index_documents_batch(
+                            index_name=index_name,
+                            documents=index_docs,
+                        )
+                        succeeded = int(result_summary.get("succeeded", 0))
+                        failed = int(result_summary.get("failed", 0))
+                    else:
+                        result = await self.search_client.upload_documents(
+                            documents=index_docs
+                        )
+                        succeeded = sum(1 for r in result if r.succeeded)
+                        failed = sum(1 for r in result if not r.succeeded)
                     total_succeeded += succeeded
                     total_failed += failed
 
@@ -1231,6 +1289,35 @@ class DocumentIngestionPipeline:
 
         if self.cosmos_client is not None:
             try:
+                cosmos_docs = []
+                for chunk in chunks:
+                    cosmos_docs.append(
+                        {
+                            "id": chunk["id"],
+                            "document_id": chunk["document_id"],
+                            "chunk_index": chunk["chunk_index"],
+                            "content": chunk["content"],
+                            "content_vector": chunk["content_vector"],
+                            "document_type": chunk["document_type"],
+                            "patient_id": patient_id,
+                            "ingested_at": chunk["ingested_at"],
+                            "content_hash": chunk.get("content_hash", ""),
+                            "entity_names": chunk.get("entity_names", []),
+                            "entity_codes": chunk.get("entity_codes", []),
+                            "metadata": chunk.get("metadata", "{}"),
+                            "ttl": -1,
+                        }
+                    )
+
+                if hasattr(self.cosmos_client, "upsert_embedding_documents"):
+                    await self.cosmos_client.upsert_embedding_documents(cosmos_docs)
+                    logger.info(
+                        "Stored %d embeddings via CosmosDBClient wrapper (patient_id=%s)",
+                        len(cosmos_docs),
+                        patient_id,
+                    )
+                    return
+
                 database = self.cosmos_client.get_database_client(
                     self._cosmos_database
                 )
@@ -1238,23 +1325,7 @@ class DocumentIngestionPipeline:
                     self._cosmos_embeddings_container
                 )
 
-                for chunk in chunks:
-                    cosmos_doc = {
-                        "id": chunk["id"],
-                        "document_id": chunk["document_id"],
-                        "chunk_index": chunk["chunk_index"],
-                        "content": chunk["content"],
-                        "content_vector": chunk["content_vector"],
-                        "document_type": chunk["document_type"],
-                        "patient_id": patient_id,
-                        "ingested_at": chunk["ingested_at"],
-                        "content_hash": chunk.get("content_hash", ""),
-                        "entity_names": chunk.get("entity_names", []),
-                        "entity_codes": chunk.get("entity_codes", []),
-                        "metadata": chunk.get("metadata", "{}"),
-                        "ttl": -1,  # No expiry by default
-                    }
-
+                for cosmos_doc in cosmos_docs:
                     await container.upsert_item(body=cosmos_doc)
 
                 logger.info(

@@ -17,10 +17,14 @@ from cdss.agents.medical_literature import MedicalLiteratureAgent
 from cdss.agents.orchestrator import OrchestratorAgent
 from cdss.agents.patient_history import PatientHistoryAgent
 from cdss.agents.protocol_agent import ProtocolAgent
+from cdss.clients.blob_storage_client import BlobStorageClient
+from cdss.clients.document_intelligence_client import DocumentIntelligenceClient
+from cdss.clients.search_client import AzureSearchClient
 from cdss.core.config import Settings, get_settings
 from cdss.core.exceptions import AzureServiceError, ValidationError
 from cdss.core.logging import get_logger
 from cdss.core.models import ClinicalQuery, ClinicalResponse
+from cdss.ingestion.pipeline import DocumentIngestionPipeline
 from cdss.services.ingestion_service import DocumentIngestionService
 
 logger = get_logger(__name__)
@@ -71,7 +75,7 @@ class ClinicalQueryService:
         else:
             self.cosmos_client = None
 
-        self.ingestion_service = ingestion_service or DocumentIngestionService()
+        self.ingestion_service = ingestion_service or self._build_default_ingestion_service()
 
         logger.info("ClinicalQueryService initialized")
 
@@ -125,6 +129,63 @@ class ClinicalQueryService:
                 extra={"agent": agent_name, "error": str(exc)},
             )
             return None
+
+    def _build_default_ingestion_service(self) -> DocumentIngestionService:
+        """Build ingestion service with concrete Azure-backed clients when available."""
+        search_client: AzureSearchClient | None = None
+        blob_client: BlobStorageClient | None = None
+        doc_intel_client: DocumentIntelligenceClient | None = None
+        embedding_service: Any | None = None
+
+        try:
+            search_client = AzureSearchClient(settings=self.settings)
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize ingestion search client; ingestion indexing will run in fallback mode",
+                extra={"error": str(exc)},
+            )
+
+        try:
+            blob_client = BlobStorageClient(settings=self.settings)
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize ingestion blob client; blob upload will run in fallback mode",
+                extra={"error": str(exc)},
+            )
+
+        try:
+            doc_intel_client = DocumentIntelligenceClient(settings=self.settings)
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize ingestion document intelligence client; OCR will run in fallback mode",
+                extra={"error": str(exc)},
+            )
+
+        # Reuse orchestrator OpenAI client for embeddings when available.
+        embedding_service = getattr(self.orchestrator, "openai_client", None)
+
+        pipeline_settings = {
+            "search_index": self.settings.azure_search_patient_records_index,
+            "protocols_index": self.settings.azure_search_treatment_protocols_index,
+            "literature_index": self.settings.azure_search_medical_literature_index,
+            "cosmos_database": self.settings.azure_cosmos_database_name,
+            "cosmos_embeddings_container": self.settings.azure_cosmos_embedding_cache_container,
+            "embedding_model": self.settings.azure_openai_embedding_deployment,
+            "embedding_dimensions": 3072,
+        }
+
+        pipeline = DocumentIngestionPipeline(
+            doc_intelligence_client=doc_intel_client,
+            blob_client=blob_client,
+            search_client=search_client,
+            cosmos_client=self.cosmos_client,
+            embedding_service=embedding_service,
+            settings=pipeline_settings,
+        )
+        return DocumentIngestionService(
+            pipeline=pipeline,
+            settings=self.settings,
+        )
 
     # ------------------------------------------------------------------
     # Query processing

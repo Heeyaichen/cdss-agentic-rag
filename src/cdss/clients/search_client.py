@@ -211,6 +211,8 @@ class AzureSearchClient:
         document_id: str,
         search_text: str = "*",
         top: int = 5,
+        search_mode: str = "all",
+        query_type: str = "simple",
     ) -> list[dict]:
         """Search chunks for a specific ingested document ID.
 
@@ -220,12 +222,14 @@ class AzureSearchClient:
         client = self._get_client(index_name)
         escaped_document_id = document_id.replace("'", "''")
         safe_search_text = search_text.strip() or "*"
+        safe_search_mode = search_mode if search_mode in {"all", "any"} else "all"
+        safe_query_type = query_type if query_type in {"simple", "semantic"} else "simple"
 
         try:
             results = client.search(
                 search_text=safe_search_text,
-                query_type="simple",
-                search_mode="all",
+                query_type=safe_query_type,
+                search_mode=safe_search_mode,
                 filter=f"document_id eq '{escaped_document_id}'",
                 top=top,
                 include_total_count=True,
@@ -254,6 +258,8 @@ class AzureSearchClient:
                 index=index_name,
                 document_id=document_id,
                 search_text=safe_search_text,
+                search_mode=safe_search_mode,
+                query_type=safe_query_type,
                 results_count=len(search_results),
             )
             return search_results
@@ -263,6 +269,8 @@ class AzureSearchClient:
                 index=index_name,
                 document_id=document_id,
                 search_text=safe_search_text,
+                search_mode=safe_search_mode,
+                query_type=safe_query_type,
                 error=str(exc),
             )
             raise RetrieverError(

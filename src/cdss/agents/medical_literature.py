@@ -8,6 +8,7 @@ scoring, and synthesizes an evidence summary with citations.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from cdss.agents.base import BaseAgent
@@ -119,6 +120,15 @@ class MedicalLiteratureAgent(BaseAgent):
 
         # Step 2: Search PubMed (real-time)
         pubmed_articles = await self._search_pubmed(optimized_query)
+        if not pubmed_articles and optimized_query.strip() != query.strip():
+            self.logger.info(
+                "Optimized PubMed query returned zero results; retrying with natural-language query",
+                extra={
+                    "optimized_query": optimized_query[:160],
+                    "fallback_query": query[:160],
+                },
+            )
+            pubmed_articles = await self._search_pubmed(query)
 
         # Step 3: Search AI Search literature cache
         cached_articles = await self._search_literature_cache(query)
@@ -174,6 +184,27 @@ class MedicalLiteratureAgent(BaseAgent):
             "citations": [c.model_dump() for c in citations],
         }
 
+    def _sanitize_pubmed_query(self, raw_query: str) -> str:
+        """Normalize LLM output into a plain PubMed query string.
+
+        The planner can occasionally return markdown wrappers such as:
+        ```plaintext
+        (query...)
+        ```
+        This helper strips formatting artifacts before the PubMed request.
+        """
+        cleaned = (raw_query or "").strip()
+        if not cleaned:
+            return ""
+
+        fenced_match = re.match(r"^```[^\n]*\n(?P<body>.*)\n```$", cleaned, flags=re.DOTALL)
+        if fenced_match:
+            cleaned = fenced_match.group("body").strip()
+
+        cleaned = re.sub(r"^\s*(pubmed\s+query|query)\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = cleaned.strip("`").strip()
+        return cleaned
+
     async def _generate_pubmed_query(
         self, natural_query: str, conditions: list[str] | None = None
     ) -> str:
@@ -212,7 +243,7 @@ class MedicalLiteratureAgent(BaseAgent):
                 temperature=0.1,
                 max_tokens=512,
             )
-            optimized = response.get("content", "").strip()
+            optimized = self._sanitize_pubmed_query(response.get("content", ""))
             # Fallback if the LLM returns empty or garbage
             if not optimized or len(optimized) < 5:
                 self.logger.warning(

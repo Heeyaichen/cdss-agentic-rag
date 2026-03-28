@@ -6,8 +6,12 @@ conversations, document ingestion, drug safety, search, and admin/health.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from fastapi import (
@@ -169,6 +173,39 @@ class DocumentVerificationRequest(BaseModel):
     )
 
 
+class DocumentGroundedPreviewRequest(BaseModel):
+    """Request body for grounded answer preview from indexed chunks."""
+
+    question: str = Field(
+        ...,
+        min_length=3,
+        max_length=2000,
+        description="Clinical question to answer using retrieved chunks.",
+    )
+    top: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Maximum number of chunks to retrieve for grounding.",
+    )
+    timeout_seconds: int = Field(
+        default=25,
+        ge=5,
+        le=90,
+        description="Timeout for grounded answer generation.",
+    )
+    max_tokens: int = Field(
+        default=700,
+        ge=128,
+        le=2000,
+        description="Token cap for grounded answer generation.",
+    )
+    use_cache: bool = Field(
+        default=True,
+        description="When true, return a cached response for identical inputs when available.",
+    )
+
+
 # ==========================================================================
 # Dependency injection
 # ==========================================================================
@@ -213,6 +250,80 @@ def get_query_service() -> ClinicalQueryService:
 router = APIRouter()
 
 
+def _build_audit_actor(http_request: Request | None) -> dict[str, str]:
+    if http_request is None:
+        return {"clinician_id": "system", "role": "service"}
+
+    claims = getattr(http_request.state, "auth_claims", {}) or {}
+    subject = getattr(http_request.state, "auth_subject", None)
+    actor_id = (
+        str(claims.get("preferred_username") or "")
+        or str(claims.get("oid") or "")
+        or str(subject or "")
+        or "system"
+    )
+    role = "clinician" if actor_id != "system" else "service"
+    return {"clinician_id": actor_id, "role": role}
+
+
+async def _log_audit_event(
+    service: ClinicalQueryService,
+    *,
+    event_type: str,
+    action: str,
+    outcome: str = "success",
+    http_request: Request | None = None,
+    resource_type: str = "system",
+    resource_id: str | None = None,
+    session_id: str | None = None,
+    patient_id: str | None = None,
+    justification: str = "",
+    details: dict[str, Any] | None = None,
+    data_sent_to_llm: bool = False,
+    phi_fields_sent: list[str] | None = None,
+    phi_fields_redacted: list[str] | None = None,
+) -> None:
+    if service.cosmos_client is None or not hasattr(service.cosmos_client, "log_audit_event"):
+        return
+
+    now = datetime.now(timezone.utc)
+    audit_event: dict[str, Any] = {
+        "id": str(uuid4()),
+        "date_partition": now.strftime("%Y-%m-%d"),
+        "event_type": event_type,
+        "timestamp": now.isoformat(),
+        "actor": _build_audit_actor(http_request),
+        "action": action,
+        "resource": {
+            "type": resource_type,
+            "id": resource_id or "unknown",
+        },
+        "session_id": session_id or str(uuid4()),
+        "justification": justification or action.replace("_", " "),
+        "outcome": outcome,
+        "data_sent_to_llm": data_sent_to_llm,
+        "phi_fields_sent": phi_fields_sent or [],
+        "phi_fields_redacted": phi_fields_redacted or [],
+    }
+
+    if patient_id:
+        audit_event["patient_id"] = patient_id
+    if details:
+        audit_event["details"] = details
+
+    try:
+        await service.cosmos_client.log_audit_event(audit_event)
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist audit event",
+            extra={
+                "event_type": event_type,
+                "action": action,
+                "error": str(exc),
+            },
+        )
+
+
 # ==========================================================================
 # Clinical Query Endpoints
 # ==========================================================================
@@ -234,21 +345,51 @@ router = APIRouter()
     ),
 )
 async def submit_clinical_query(
+    http_request: Request,
     request: ClinicalQueryRequest,
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> ClinicalResponse:
     """Submit a clinical query for AI-powered decision support."""
+    effective_session_id = request.session_id or str(uuid4())
     try:
         response = await service.process_query(
             query_text=request.text,
             patient_id=request.patient_id,
-            session_id=request.session_id,
+            session_id=effective_session_id,
         )
         return response
 
     except ValidationError as exc:
+        await _log_audit_event(
+            service,
+            event_type="clinical_query",
+            action="process_clinical_query",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="clinical_query",
+            resource_id=effective_session_id,
+            session_id=effective_session_id,
+            patient_id=request.patient_id,
+            justification="Clinical query validation failed",
+            details={"error": exc.message},
+            data_sent_to_llm=False,
+        )
         raise HTTPException(status_code=422, detail=exc.message) from exc
     except AzureServiceError as exc:
+        await _log_audit_event(
+            service,
+            event_type="clinical_query",
+            action="process_clinical_query",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="clinical_query",
+            resource_id=effective_session_id,
+            session_id=effective_session_id,
+            patient_id=request.patient_id,
+            justification="Clinical query upstream service failure",
+            details={"error": exc.message},
+            data_sent_to_llm=True,
+        )
         logger.error(
             "Azure service error during query processing",
             extra={"error": exc.message},
@@ -258,6 +399,20 @@ async def submit_clinical_query(
             detail="An upstream service error occurred. Please try again later.",
         ) from exc
     except CDSSError as exc:
+        await _log_audit_event(
+            service,
+            event_type="clinical_query",
+            action="process_clinical_query",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="clinical_query",
+            resource_id=effective_session_id,
+            session_id=effective_session_id,
+            patient_id=request.patient_id,
+            justification="Clinical query processing failed",
+            details={"error": exc.message},
+            data_sent_to_llm=True,
+        )
         logger.error(
             "CDSS error during query processing",
             extra={"error": exc.message},
@@ -272,6 +427,7 @@ async def submit_clinical_query(
     description="Stream clinical query response via Server-Sent Events using GET with query parameters. Compatible with EventSource API.",
 )
 async def stream_clinical_query_get(
+    http_request: Request,
     query: str = Query(..., min_length=1, max_length=5000, description="The clinical query text."),
     patient_id: str | None = Query(None, description="Optional patient ID for context."),
     session_id: str | None = Query(None, description="Optional session ID for conversation continuity."),
@@ -287,13 +443,14 @@ async def stream_clinical_query_get(
     """
 
     async def event_generator():
+        effective_session_id = session_id or str(uuid4())
         try:
             yield _sse_event(
                 "processing",
                 {
                     "status": "started",
                     "message": "Processing clinical query...",
-                    "session_id": session_id or str(uuid4()),
+                    "session_id": effective_session_id,
                 },
             )
 
@@ -308,7 +465,7 @@ async def stream_clinical_query_get(
             response = await service.process_query(
                 query_text=query,
                 patient_id=patient_id,
-                session_id=session_id,
+                session_id=effective_session_id,
             )
 
             for agent_name, agent_output in response.agent_outputs.items():
@@ -343,11 +500,39 @@ async def stream_clinical_query_get(
             )
 
         except CDSSError as exc:
+            await _log_audit_event(
+                service,
+                event_type="clinical_query_stream",
+                action="stream_clinical_query",
+                outcome="failure",
+                http_request=http_request,
+                resource_type="clinical_query",
+                resource_id=effective_session_id,
+                session_id=effective_session_id,
+                patient_id=patient_id,
+                justification="Streaming clinical query failed",
+                details={"error": exc.message},
+                data_sent_to_llm=True,
+            )
             yield _sse_event(
                 "error",
                 {"message": exc.message, "type": type(exc).__name__},
             )
         except Exception as exc:
+            await _log_audit_event(
+                service,
+                event_type="clinical_query_stream",
+                action="stream_clinical_query",
+                outcome="failure",
+                http_request=http_request,
+                resource_type="clinical_query",
+                resource_id=effective_session_id,
+                session_id=effective_session_id,
+                patient_id=patient_id,
+                justification="Streaming clinical query raised unexpected exception",
+                details={"error": str(exc)},
+                data_sent_to_llm=True,
+            )
             logger.error("Stream error", extra={"error": str(exc)}, exc_info=True)
             yield _sse_event(
                 "error",
@@ -372,6 +557,7 @@ async def stream_clinical_query_get(
     description="Stream clinical query response via Server-Sent Events.",
 )
 async def stream_clinical_query(
+    http_request: Request,
     request: ClinicalQueryRequest,
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> StreamingResponse:
@@ -383,13 +569,14 @@ async def stream_clinical_query(
 
     async def event_generator():
         """Generate SSE events for the clinical query."""
+        effective_session_id = request.session_id or str(uuid4())
         try:
             yield _sse_event(
                 "processing",
                 {
                     "status": "started",
                     "message": "Processing clinical query...",
-                    "session_id": request.session_id or str(uuid4()),
+                    "session_id": effective_session_id,
                 },
             )
 
@@ -404,7 +591,7 @@ async def stream_clinical_query(
             response = await service.process_query(
                 query_text=request.text,
                 patient_id=request.patient_id,
-                session_id=request.session_id,
+                session_id=effective_session_id,
             )
 
             for agent_name, agent_output in response.agent_outputs.items():
@@ -439,11 +626,39 @@ async def stream_clinical_query(
             )
 
         except CDSSError as exc:
+            await _log_audit_event(
+                service,
+                event_type="clinical_query_stream",
+                action="stream_clinical_query",
+                outcome="failure",
+                http_request=http_request,
+                resource_type="clinical_query",
+                resource_id=effective_session_id,
+                session_id=effective_session_id,
+                patient_id=request.patient_id,
+                justification="Streaming clinical query failed",
+                details={"error": exc.message},
+                data_sent_to_llm=True,
+            )
             yield _sse_event(
                 "error",
                 {"message": exc.message, "type": type(exc).__name__},
             )
         except Exception as exc:
+            await _log_audit_event(
+                service,
+                event_type="clinical_query_stream",
+                action="stream_clinical_query",
+                outcome="failure",
+                http_request=http_request,
+                resource_type="clinical_query",
+                resource_id=effective_session_id,
+                session_id=effective_session_id,
+                patient_id=request.patient_id,
+                justification="Streaming clinical query raised unexpected exception",
+                details={"error": str(exc)},
+                data_sent_to_llm=True,
+            )
             logger.error("Stream error", extra={"error": str(exc)}, exc_info=True)
             yield _sse_event(
                 "error",
@@ -651,6 +866,46 @@ async def submit_feedback(
 _ingestion_status: dict[str, dict] = {}
 _INGESTION_STATUS_PARTITION_KEY = "ingestion_status"
 _INGESTION_STATUS_DOC_TYPE = "ingestion_status"
+_grounded_preview_cache: dict[str, dict] = {}
+_GROUNDED_PREVIEW_CACHE_MAX_ITEMS = 128
+
+
+def _build_grounded_preview_cache_key(
+    *,
+    document_id: str,
+    pipeline_document_id: str,
+    logical_index_name: str,
+    question: str,
+    top: int,
+    max_tokens: int,
+) -> str:
+    raw_key = "|".join(
+        [
+            document_id,
+            pipeline_document_id,
+            logical_index_name,
+            question.strip().lower(),
+            str(top),
+            str(max_tokens),
+        ]
+    )
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _get_grounded_preview_cache_entry(cache_key: str) -> dict | None:
+    entry = _grounded_preview_cache.pop(cache_key, None)
+    if entry is None:
+        return None
+    # Move to end to keep recently used items.
+    _grounded_preview_cache[cache_key] = entry
+    return entry
+
+
+def _put_grounded_preview_cache_entry(cache_key: str, payload: dict) -> None:
+    _grounded_preview_cache[cache_key] = payload
+    while len(_grounded_preview_cache) > _GROUNDED_PREVIEW_CACHE_MAX_ITEMS:
+        oldest_key = next(iter(_grounded_preview_cache))
+        _grounded_preview_cache.pop(oldest_key, None)
 
 
 def _resolve_ingestion_status_client(query_service: ClinicalQueryService) -> object | None:
@@ -778,11 +1033,184 @@ def _resolve_workspace_target(normalized_document_type: str) -> str:
     return "query_patient_context"
 
 
+async def _resolve_index_with_document_hits(
+    search_client: AzureSearchClient,
+    *,
+    pipeline_document_id: str,
+    preferred_index_name: str,
+    top: int,
+) -> tuple[str, list[dict], bool]:
+    """Resolve an index that actually contains chunks for this document.
+
+    Supports compatibility with legacy uploads that may have been indexed into
+    a different logical index than their normalized document type.
+    """
+    candidate_indexes = [
+        preferred_index_name,
+        *[
+            idx
+            for idx in (INDEX_PATIENT_RECORDS, INDEX_TREATMENT_PROTOCOLS, INDEX_MEDICAL_LITERATURE)
+            if idx != preferred_index_name
+        ],
+    ]
+
+    for idx in candidate_indexes:
+        indexed_hits = await search_client.search_document_chunks(
+            index_name=idx,
+            document_id=pipeline_document_id,
+            search_text="*",
+            top=top,
+        )
+        if indexed_hits:
+            return idx, indexed_hits, idx != preferred_index_name
+
+    return preferred_index_name, [], False
+
+
 def _build_content_preview(content: str, max_len: int = 180) -> str:
     compact = " ".join(content.split())
     if len(compact) <= max_len:
         return compact
     return f"{compact[: max_len - 3]}..."
+
+
+def _parse_json_object_from_text(content: str) -> dict[str, Any] | None:
+    """Best-effort parser for model outputs that should be JSON objects."""
+    raw = (content or "").strip()
+    if not raw:
+        return {}
+
+    def _try_load(candidate: str) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+        # Some models wrap the JSON object as a JSON string; unwrap once.
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                return None
+
+        return parsed if isinstance(parsed, dict) else None
+
+    direct = _try_load(raw)
+    if direct is not None:
+        return direct
+
+    fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
+    for block in fenced_blocks:
+        parsed = _try_load(block.strip())
+        if parsed is not None:
+            return parsed
+
+    first_brace = raw.find("{")
+    last_brace = raw.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        parsed = _try_load(raw[first_brace : last_brace + 1])
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
+def _tokenize_question_keywords(question: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]+", question.lower())
+    return [token for token in tokens if len(token) >= 4]
+
+
+def _select_quote_from_content(content: str, question: str, max_len: int = 260) -> str:
+    text = " ".join(content.split())
+    if not text:
+        return ""
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
+    if not sentences:
+        return text[:max_len]
+
+    keywords = _tokenize_question_keywords(question)
+    if not keywords:
+        return sentences[0][:max_len]
+
+    best_sentence = sentences[0]
+    best_score = -1
+    for sentence in sentences:
+        lowered = sentence.lower()
+        score = sum(1 for keyword in keywords if keyword in lowered)
+        if score > best_score:
+            best_score = score
+            best_sentence = sentence
+
+    return best_sentence[:max_len]
+
+
+def _build_extractive_grounded_fallback(
+    *,
+    retrieved_hits: list[dict[str, Any]],
+    question: str,
+    max_citations: int = 3,
+) -> dict[str, Any]:
+    citations: list[dict[str, Any]] = []
+    answer_parts: list[str] = []
+
+    for hit in retrieved_hits[:max_citations]:
+        chunk_id = str(hit.get("id") or "").strip()
+        content = str(hit.get("content") or "")
+        if not chunk_id or not content:
+            continue
+
+        quote = _select_quote_from_content(content, question)
+        if not quote:
+            continue
+
+        citations.append(
+            {
+                "chunk_id": chunk_id,
+                "chunk_index": hit.get("chunk_index"),
+                "quote": quote,
+                "score": hit.get("score", 0.0),
+                "content_preview": _build_content_preview(content),
+            }
+        )
+        answer_parts.append(quote)
+
+    if not citations:
+        return {
+            "status": "no_supporting_evidence",
+            "answer": "No supporting evidence found in indexed chunks for this question.",
+            "confidence": 0.0,
+            "citations": [],
+        }
+
+    fallback_answer = " ".join(answer_parts)
+    return {
+        "status": "ok",
+        "answer": fallback_answer,
+        "confidence": 0.35,
+        "citations": citations,
+    }
+
+
+def _extract_literature_articles(response: ClinicalResponse) -> list[dict]:
+    literature_output = response.agent_outputs.get("literature")
+    articles: list[dict] = []
+    if literature_output and literature_output.raw_data:
+        raw = literature_output.raw_data
+        if isinstance(raw.get("papers"), list):
+            articles = raw.get("papers", [])
+        elif isinstance(raw.get("articles"), list):
+            articles = raw.get("articles", [])
+        elif isinstance(raw.get("literature_evidence"), dict):
+            evidence = raw.get("literature_evidence", {})
+            papers = evidence.get("papers", [])
+            if isinstance(papers, list):
+                articles = papers
+    return articles
 
 
 @router.post(
@@ -908,6 +1336,25 @@ async def ingest_document(
         },
     )
 
+    await _log_audit_event(
+        service,
+        event_type="document_ingest",
+        action="ingest_document",
+        outcome="success",
+        http_request=request,
+        resource_type="document",
+        resource_id=document_id,
+        session_id=str(uuid4()),
+        patient_id=patient_id,
+        justification=f"Document ingest requested: {document_type}",
+        details={
+            "filename": file.filename or "unknown",
+            "document_type": document_type,
+            "normalized_document_type": normalized_document_type,
+        },
+        data_sent_to_llm=False,
+    )
+
     # Schedule background processing
     if background_tasks is not None:
         background_tasks.add_task(
@@ -1023,6 +1470,25 @@ async def _process_document_background(
                 "pipeline_document_id": result.get("document_id"),
             },
         )
+        await _log_audit_event(
+            query_service,
+            event_type="document_ingestion_completed",
+            action="process_document_ingestion",
+            outcome="success",
+            resource_type="document",
+            resource_id=document_id,
+            session_id=str(uuid4()),
+            patient_id=patient_id,
+            justification=f"Document ingestion completed for {document_type}",
+            details={
+                "filename": filename,
+                "document_type": document_type,
+                "normalized_document_type": normalized_document_type,
+                "pipeline_document_id": str(result.get("document_id") or ""),
+                "status": result_status,
+            },
+            data_sent_to_llm=False,
+        )
 
     except Exception as exc:
         await _update_ingestion_status(
@@ -1036,6 +1502,24 @@ async def _process_document_background(
         logger.error(
             "Document processing failed",
             extra={"document_id": document_id, "error": str(exc)},
+        )
+        await _log_audit_event(
+            query_service,
+            event_type="document_ingestion_completed",
+            action="process_document_ingestion",
+            outcome="failure",
+            resource_type="document",
+            resource_id=document_id,
+            session_id=str(uuid4()),
+            patient_id=patient_id,
+            justification=f"Document ingestion failed for {document_type}",
+            details={
+                "filename": filename,
+                "document_type": document_type,
+                "normalized_document_type": normalized_document_type,
+                "error": str(exc),
+            },
+            data_sent_to_llm=False,
         )
 
 
@@ -1098,12 +1582,23 @@ async def verify_document_index_and_retrieval(
     try:
         search_client = AzureSearchClient(settings=service.settings)
 
-        indexed_hits = await search_client.search_document_chunks(
-            index_name=logical_index_name,
-            document_id=pipeline_document_id,
-            search_text="*",
+        resolved_logical_index_name, indexed_hits, resolved_by_fallback = await _resolve_index_with_document_hits(
+            search_client,
+            pipeline_document_id=pipeline_document_id,
+            preferred_index_name=logical_index_name,
             top=request.top,
         )
+        if resolved_by_fallback:
+            logger.warning(
+                "Document verification index fallback used",
+                extra={
+                    "document_id": document_id,
+                    "pipeline_document_id": pipeline_document_id,
+                    "preferred_index": logical_index_name,
+                    "resolved_index": resolved_logical_index_name,
+                },
+            )
+        logical_index_name = resolved_logical_index_name
 
         phrase = (request.phrase or "").strip()
         phrase_hits: list[dict] = []
@@ -1131,6 +1626,7 @@ async def verify_document_index_and_retrieval(
             "workspace_target": workspace_target,
             "logical_index_name": logical_index_name,
             "physical_index_name": search_client.resolve_index_name(logical_index_name),
+            "resolved_by_index_fallback": resolved_by_fallback,
             "indexed_chunks_count": len(indexed_hits),
             "indexed_chunks": [normalize_hit(hit) for hit in indexed_hits],
             "phrase": phrase or None,
@@ -1144,12 +1640,273 @@ async def verify_document_index_and_retrieval(
         ) from exc
 
 
+@router.post(
+    "/api/v1/documents/{document_id}/grounded-preview",
+    tags=["Documents"],
+    summary="Generate grounded answer preview from indexed chunks",
+)
+async def generate_grounded_answer_preview(
+    document_id: str,
+    request: DocumentGroundedPreviewRequest,
+    service: ClinicalQueryService = Depends(get_query_service),
+) -> dict:
+    """Generate an answer strictly grounded in indexed chunks for a document.
+
+    This endpoint intentionally stays separate from deterministic index
+    verification to keep retrieval diagnostics and LLM synthesis isolated.
+    """
+    status = await _get_ingestion_status_record(service, document_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    status_value = str(status.get("status", "")).lower()
+    if status_value not in {"completed"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Document '{document_id}' is not ready for grounded preview. Current status: {status_value}.",
+        )
+
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="question must not be empty.")
+
+    normalized_document_type = str(
+        status.get("normalized_document_type")
+        or status.get("document_type")
+        or "generic"
+    )
+    pipeline_document_id = str(status.get("pipeline_document_id") or document_id)
+    logical_index_name = _resolve_logical_index_for_document_type(normalized_document_type)
+    workspace_target = _resolve_workspace_target(normalized_document_type)
+
+    cache_key = _build_grounded_preview_cache_key(
+        document_id=document_id,
+        pipeline_document_id=pipeline_document_id,
+        logical_index_name=logical_index_name,
+        question=question,
+        top=request.top,
+        max_tokens=request.max_tokens,
+    )
+
+    if request.use_cache:
+        cached = _get_grounded_preview_cache_entry(cache_key)
+        if cached is not None:
+            return {**cached, "cached": True}
+
+    search_client = AzureSearchClient(settings=service.settings)
+    search_timeout = max(3, min(request.timeout_seconds - 2, 30))
+    retrieval_strategy = "question_search_any"
+    resolved_by_fallback = False
+    retrieved_hits: list[dict] = []
+
+    try:
+        resolved_logical_index_name, indexed_hits, resolved_by_fallback = await _resolve_index_with_document_hits(
+            search_client,
+            pipeline_document_id=pipeline_document_id,
+            preferred_index_name=logical_index_name,
+            top=request.top,
+        )
+        logical_index_name = resolved_logical_index_name
+
+        retrieved_hits = await asyncio.wait_for(
+            search_client.search_document_chunks(
+                index_name=logical_index_name,
+                document_id=pipeline_document_id,
+                search_text=question,
+                top=request.top,
+                search_mode="any",
+            ),
+            timeout=search_timeout,
+        )
+
+        if not retrieved_hits:
+            retrieval_strategy = "document_scope_fallback_wildcard"
+            retrieved_hits = indexed_hits
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Timed out retrieving indexed chunks for grounded preview.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Grounded preview retrieval failed: {exc}",
+        ) from exc
+
+    base_response = {
+        "document_id": document_id,
+        "pipeline_document_id": pipeline_document_id,
+        "normalized_document_type": normalized_document_type,
+        "workspace_target": workspace_target,
+        "logical_index_name": logical_index_name,
+        "physical_index_name": search_client.resolve_index_name(logical_index_name),
+        "resolved_by_index_fallback": resolved_by_fallback,
+        "question": question,
+        "retrieval_strategy": retrieval_strategy,
+        "retrieved_chunks_count": len(retrieved_hits),
+    }
+
+    if not retrieved_hits:
+        payload = {
+            **base_response,
+            "status": "no_supporting_evidence",
+            "answer": "No supporting evidence found in indexed chunks for this question.",
+            "confidence": 0.0,
+            "citations": [],
+            "cached": False,
+        }
+        if request.use_cache:
+            _put_grounded_preview_cache_entry(cache_key, {k: v for k, v in payload.items() if k != "cached"})
+        return payload
+
+    openai_client = getattr(getattr(service, "orchestrator", None), "openai_client", None)
+    if openai_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Grounded preview is unavailable because the OpenAI client is not configured.",
+        )
+
+    grounding_context = [
+        {
+            "chunk_id": str(hit.get("id", "")),
+            "chunk_index": hit.get("chunk_index"),
+            "content": str(hit.get("content", "")),
+        }
+        for hit in retrieved_hits
+        if hit.get("id")
+    ]
+
+    system_prompt = (
+        "You are a clinical evidence assistant. Answer ONLY from provided chunk context. "
+        "If evidence is insufficient, set no_supporting_evidence=true and return no citations. "
+        "Return strict JSON: {\"answer\": string, \"confidence\": number, "
+        "\"no_supporting_evidence\": boolean, \"citations\": [{\"chunk_id\": string, \"quote\": string}]}. "
+        "Every citation quote must be verbatim text from the cited chunk."
+    )
+    user_payload = {
+        "question": question,
+        "chunks": grounding_context,
+    }
+
+    try:
+        llm_response = await asyncio.wait_for(
+            openai_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload)},
+                ],
+                model="gpt-4o-mini",
+                temperature=0.0,
+                max_tokens=request.max_tokens,
+                response_format={"type": "json_object"},
+            ),
+            timeout=request.timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Timed out generating grounded answer preview.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Grounded preview synthesis failed: {exc}",
+        ) from exc
+
+    llm_content = str(llm_response.get("content") or "")
+    llm_payload = _parse_json_object_from_text(llm_content)
+    if llm_payload is None:
+        logger.warning(
+            "Grounded preview model output was not valid JSON",
+            extra={
+                "document_id": document_id,
+                "pipeline_document_id": pipeline_document_id,
+                "logical_index_name": logical_index_name,
+                "content_preview": _build_content_preview(llm_content, max_len=240),
+            },
+        )
+        fallback = _build_extractive_grounded_fallback(
+            retrieved_hits=retrieved_hits,
+            question=question,
+        )
+        payload = {
+            **base_response,
+            "status": fallback["status"],
+            "answer": fallback["answer"],
+            "confidence": fallback["confidence"],
+            "citations": fallback["citations"],
+            "cached": False,
+        }
+        if request.use_cache:
+            _put_grounded_preview_cache_entry(cache_key, {k: v for k, v in payload.items() if k != "cached"})
+        return payload
+
+    raw_answer = str(llm_payload.get("answer") or "").strip()
+    if not raw_answer:
+        raw_answer = "No supporting evidence found in indexed chunks for this question."
+
+    raw_confidence = llm_payload.get("confidence", 0.0)
+    try:
+        confidence = float(raw_confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    hit_by_id = {
+        str(hit.get("id")): hit
+        for hit in retrieved_hits
+        if hit.get("id")
+    }
+    valid_citations: list[dict] = []
+    for item in llm_payload.get("citations", []):
+        if not isinstance(item, dict):
+            continue
+        chunk_id = str(item.get("chunk_id") or "").strip()
+        quote = str(item.get("quote") or "").strip()
+        if not chunk_id or not quote:
+            continue
+        hit = hit_by_id.get(chunk_id)
+        if hit is None:
+            continue
+        content = str(hit.get("content", ""))
+        if quote.lower() not in content.lower():
+            continue
+        valid_citations.append(
+            {
+                "chunk_id": chunk_id,
+                "chunk_index": hit.get("chunk_index"),
+                "quote": quote,
+                "score": hit.get("score", 0.0),
+                "content_preview": _build_content_preview(content),
+            }
+        )
+
+    no_supporting_evidence = bool(llm_payload.get("no_supporting_evidence")) or not valid_citations
+    answer = raw_answer
+    if no_supporting_evidence:
+        answer = "No supporting evidence found in indexed chunks for this question."
+        confidence = 0.0
+
+    payload = {
+        **base_response,
+        "status": "no_supporting_evidence" if no_supporting_evidence else "ok",
+        "answer": answer,
+        "confidence": confidence,
+        "citations": valid_citations,
+        "cached": False,
+    }
+    if request.use_cache:
+        _put_grounded_preview_cache_entry(cache_key, {k: v for k, v in payload.items() if k != "cached"})
+    return payload
+
+
 @router.delete(
     "/api/v1/documents/{document_id}",
     tags=["Documents"],
     summary="Delete an ingested document and its indexed chunks",
 )
 async def delete_ingested_document(
+    http_request: Request,
     document_id: str,
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
@@ -1191,7 +1948,7 @@ async def delete_ingested_document(
 
         await _delete_ingestion_status_record(service, document_id)
 
-        return {
+        response_payload = {
             "document_id": document_id,
             "pipeline_document_id": pipeline_document_id,
             "normalized_document_type": normalized_document_type,
@@ -1200,9 +1957,42 @@ async def delete_ingested_document(
             "deleted_chunks_count": int(delete_summary.get("deleted_count", 0)),
             "status": "deleted",
         }
+        await _log_audit_event(
+            service,
+            event_type="document_delete",
+            action="delete_ingested_document",
+            outcome="success",
+            http_request=http_request,
+            resource_type="document",
+            resource_id=document_id,
+            session_id=str(uuid4()),
+            patient_id=str(status.get("patient_id") or "") or None,
+            justification="Delete ingested document",
+            details={
+                "pipeline_document_id": pipeline_document_id,
+                "deleted_chunks_count": int(delete_summary.get("deleted_count", 0)),
+                "normalized_document_type": normalized_document_type,
+            },
+            data_sent_to_llm=False,
+        )
+        return response_payload
     except HTTPException:
         raise
     except Exception as exc:
+        await _log_audit_event(
+            service,
+            event_type="document_delete",
+            action="delete_ingested_document",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="document",
+            resource_id=document_id,
+            session_id=str(uuid4()),
+            patient_id=str(status.get("patient_id") or "") or None,
+            justification="Delete ingested document failed",
+            details={"error": str(exc)},
+            data_sent_to_llm=False,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"Document deletion failed: {exc}",
@@ -1220,6 +2010,7 @@ async def delete_ingested_document(
     summary="Check drug interactions",
 )
 async def check_drug_interactions(
+    http_request: Request,
     request: DrugInteractionRequest,
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
@@ -1285,7 +2076,7 @@ async def check_drug_interactions(
         raw_alerts = interactions_data.get("drug_alerts", interactions_data.get("alerts", []))
         interactions = report_data.get("interactions", interactions_data.get("interactions", []))
 
-        return {
+        response_payload = {
             "medications_checked": current_medications,
             "proposed_medications": proposed_medications,
             "interactions": interactions,
@@ -1304,10 +2095,62 @@ async def check_drug_interactions(
             "dosage_adjustments": report_data.get("dosage_adjustments", []),
             "summary": interactions_data.get("summary", "Interaction analysis completed."),
         }
+        severity_counts = {"major": 0, "moderate": 0, "minor": 0}
+        for item in interactions:
+            severity = str(item.get("severity", "")).lower()
+            if severity in severity_counts:
+                severity_counts[severity] += 1
+        await _log_audit_event(
+            service,
+            event_type="drug_interaction_analysis",
+            action="check_drug_interactions",
+            outcome="success",
+            http_request=http_request,
+            resource_type="drug_safety",
+            resource_id=str(uuid4()),
+            session_id=str(task.session_id),
+            justification="Drug interaction analysis completed",
+            details={
+                "medications_checked": len(current_medications),
+                "proposed_medications": len(proposed_medications),
+                "interactions_found": len(interactions),
+                "major_interactions": severity_counts["major"],
+                "moderate_interactions": severity_counts["moderate"],
+                "minor_interactions": severity_counts["minor"],
+            },
+            data_sent_to_llm=True,
+        )
+        return response_payload
 
     except DrugSafetyError as exc:
+        await _log_audit_event(
+            service,
+            event_type="drug_interaction_analysis",
+            action="check_drug_interactions",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="drug_safety",
+            resource_id=str(uuid4()),
+            session_id=str(uuid4()),
+            justification="Drug interaction analysis failed",
+            details={"error": exc.message},
+            data_sent_to_llm=True,
+        )
         raise HTTPException(status_code=502, detail=exc.message) from exc
     except CDSSError as exc:
+        await _log_audit_event(
+            service,
+            event_type="drug_interaction_analysis",
+            action="check_drug_interactions",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="drug_safety",
+            resource_id=str(uuid4()),
+            session_id=str(uuid4()),
+            justification="Drug interaction analysis failed",
+            details={"error": exc.message},
+            data_sent_to_llm=True,
+        )
         raise HTTPException(status_code=500, detail=exc.message) from exc
 
 
@@ -1373,6 +2216,7 @@ async def get_drug_info(
     summary="Search medical literature",
 )
 async def search_literature(
+    http_request: Request,
     request: LiteratureSearchRequest,
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
@@ -1389,45 +2233,77 @@ async def search_literature(
         Search results with articles and relevance scores.
     """
     try:
-        query_text = request.query
+        base_query_text = request.query.strip()
+        strict_query_text = base_query_text
         if request.date_from:
-            query_text += f" (date_from: {request.date_from})"
+            strict_query_text += f" (date_from: {request.date_from})"
         if request.date_range:
             start = request.date_range.get("start", "").strip()
             end = request.date_range.get("end", "").strip()
             if start or end:
-                query_text += f" (publication_date_range: {start or 'any'} to {end or 'any'})"
+                strict_query_text += f" (publication_date_range: {start or 'any'} to {end or 'any'})"
         if request.article_types:
             filtered_types = [t.strip() for t in request.article_types if t and t.strip()]
             if filtered_types:
-                query_text += f" (article_types: {', '.join(filtered_types)})"
+                strict_query_text += f" (article_types: {', '.join(filtered_types)})"
 
-        response = await service.process_query(query_text=query_text)
+        response = await service.process_query(query_text=strict_query_text)
+        articles = _extract_literature_articles(response)
+        used_fallback = False
 
-        literature_output = response.agent_outputs.get("literature")
-        articles = []
-        if literature_output and literature_output.raw_data:
-            raw = literature_output.raw_data
-            if isinstance(raw.get("papers"), list):
-                articles = raw.get("papers", [])
-            elif isinstance(raw.get("articles"), list):
-                articles = raw.get("articles", [])
-            elif isinstance(raw.get("literature_evidence"), dict):
-                evidence = raw.get("literature_evidence", {})
-                papers = evidence.get("papers", [])
-                if isinstance(papers, list):
-                    articles = papers
+        # If strict/filter-enriched query produced no evidence, retry with base query.
+        # This prevents LLM query-planning over-constraint from wiping valid results.
+        if not articles and strict_query_text != base_query_text:
+            fallback_response = await service.process_query(query_text=base_query_text)
+            fallback_articles = _extract_literature_articles(fallback_response)
+            if fallback_articles:
+                response = fallback_response
+                articles = fallback_articles
+                used_fallback = True
 
-        return {
+        response_payload = {
             "query": request.query,
+            "query_mode": "fallback_broadened" if used_fallback else "strict",
             "total_results": len(articles),
             "articles": articles[: request.max_results],
             "papers": articles[: request.max_results],
             "evidence_summary": response.evidence_summary,
             "citations": [c.model_dump(mode="json") for c in response.citations],
         }
+        await _log_audit_event(
+            service,
+            event_type="literature_search",
+            action="search_literature",
+            outcome="success",
+            http_request=http_request,
+            resource_type="literature",
+            resource_id=str(uuid4()),
+            session_id=str(uuid4()),
+            justification="Literature search completed",
+            details={
+                "query_length": len(request.query),
+                "query_mode": response_payload["query_mode"],
+                "total_results": len(articles),
+                "returned_results": len(response_payload["articles"]),
+            },
+            data_sent_to_llm=True,
+        )
+        return response_payload
 
     except CDSSError as exc:
+        await _log_audit_event(
+            service,
+            event_type="literature_search",
+            action="search_literature",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="literature",
+            resource_id=str(uuid4()),
+            session_id=str(uuid4()),
+            justification="Literature search failed",
+            details={"error": exc.message},
+            data_sent_to_llm=True,
+        )
         raise HTTPException(status_code=500, detail=exc.message) from exc
 
 
@@ -1437,6 +2313,7 @@ async def search_literature(
     summary="Search clinical protocols",
 )
 async def search_protocols(
+    http_request: Request,
     request: ProtocolSearchRequest,
     service: ClinicalQueryService = Depends(get_query_service),
 ) -> dict:
@@ -1465,7 +2342,7 @@ async def search_protocols(
         if protocol_output and protocol_output.raw_data:
             protocols = protocol_output.raw_data.get("protocols", [])
 
-        return {
+        response_payload = {
             "query": request.query,
             "specialty": request.specialty,
             "evidence_grade": request.evidence_grade,
@@ -1473,8 +2350,38 @@ async def search_protocols(
             "protocols": protocols,
             "summary": response.recommendation,
         }
+        await _log_audit_event(
+            service,
+            event_type="protocol_search",
+            action="search_protocols",
+            outcome="success",
+            http_request=http_request,
+            resource_type="protocol",
+            resource_id=str(uuid4()),
+            session_id=str(uuid4()),
+            justification="Protocol search completed",
+            details={
+                "query_length": len(request.query),
+                "total_results": len(protocols),
+            },
+            data_sent_to_llm=True,
+        )
+        return response_payload
 
     except CDSSError as exc:
+        await _log_audit_event(
+            service,
+            event_type="protocol_search",
+            action="search_protocols",
+            outcome="failure",
+            http_request=http_request,
+            resource_type="protocol",
+            resource_id=str(uuid4()),
+            session_id=str(uuid4()),
+            justification="Protocol search failed",
+            details={"error": exc.message},
+            data_sent_to_llm=True,
+        )
         raise HTTPException(status_code=500, detail=exc.message) from exc
 
 
@@ -1496,11 +2403,30 @@ async def health_check() -> dict:
     Returns:
         Service health status dictionary.
     """
+    service = get_query_service()
+    orchestrator = getattr(service, "orchestrator", None)
+    ingestion_service = getattr(service, "ingestion_service", None)
+    pipeline = getattr(ingestion_service, "pipeline", None)
+
+    services = {
+        "orchestrator": "healthy" if orchestrator is not None else "degraded",
+        "azure_openai": "healthy" if getattr(orchestrator, "openai_client", None) is not None else "degraded",
+        "cosmos_db": "healthy" if service.cosmos_client is not None else "degraded",
+        "ingestion_pipeline": "healthy" if ingestion_service is not None else "degraded",
+        "azure_search": "healthy" if getattr(pipeline, "search_client", None) is not None else "degraded",
+        "document_intelligence": (
+            "healthy" if getattr(pipeline, "doc_intelligence_client", None) is not None else "degraded"
+        ),
+        "blob_storage": "healthy" if getattr(pipeline, "blob_client", None) is not None else "degraded",
+    }
+    overall_status = "healthy" if all(status == "healthy" for status in services.values()) else "degraded"
+
     return {
-        "status": "healthy",
+        "status": overall_status,
         "version": "0.1.0",
         "service": "cdss-agentic-rag",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "services": services,
     }
 
 

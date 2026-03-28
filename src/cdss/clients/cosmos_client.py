@@ -661,6 +661,40 @@ class CosmosDBClient:
             )
             raise AzureServiceError(f"Failed to retrieve agent state for session '{session_id}': {exc}") from exc
 
+    async def upsert_embedding_documents(self, documents: list[dict[str, Any]]) -> int:
+        """Upsert embedding documents into the embedding cache container.
+
+        Args:
+            documents: Embedding documents shaped for the embedding cache container.
+
+        Returns:
+            Number of successfully upserted embedding documents.
+
+        Raises:
+            AzureServiceError: If upsert operation fails.
+        """
+        container = self._get_container(CONTAINER_EMBEDDING_CACHE)
+
+        try:
+            upserted = 0
+            for document in documents:
+                container.upsert_item(body=document)
+                upserted += 1
+
+            logger.debug(
+                "Embedding documents upserted",
+                count=upserted,
+            )
+            return upserted
+
+        except Exception as exc:
+            logger.error(
+                "Failed to upsert embedding documents",
+                count=len(documents),
+                error=str(exc),
+            )
+            raise AzureServiceError(f"Failed to upsert embedding documents: {exc}") from exc
+
     # -------------------------------------------------------------------------
     # Ingestion Status (durable, multi-replica safe)
     # -------------------------------------------------------------------------

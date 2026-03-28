@@ -87,10 +87,27 @@ class DocumentIntelligenceClient:
                 document_size_bytes=len(document_bytes),
             )
 
-            poller = self._client.begin_analyze_document(
-                model_id=model_id,
-                analyze_request=AnalyzeDocumentRequest(bytes_source=document_bytes),
-            )
+            # SDK compatibility:
+            # Newer azure-ai-documentintelligence expects `body=...`.
+            # Older versions accepted `analyze_request=...`.
+            try:
+                poller = self._client.begin_analyze_document(
+                    model_id=model_id,
+                    body=document_bytes,
+                    content_type="application/pdf",
+                )
+            except TypeError:
+                try:
+                    poller = self._client.begin_analyze_document(
+                        model_id=model_id,
+                        analyze_request=document_bytes,
+                        content_type="application/pdf",
+                    )
+                except TypeError:
+                    poller = self._client.begin_analyze_document(
+                        model_id=model_id,
+                        analyze_request=AnalyzeDocumentRequest(bytes_source=document_bytes),
+                    )
             result = poller.result()
 
             # Extract pages

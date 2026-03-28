@@ -1182,7 +1182,7 @@ class OrchestratorAgent:
         try:
             audit_entry = AuditLogEntry(
                 date_partition=now.strftime("%Y-%m-%d"),
-                type="clinical_query",
+                event_type="clinical_query",
                 timestamp=now,
                 actor={
                     "clinician_id": clinician_id,
