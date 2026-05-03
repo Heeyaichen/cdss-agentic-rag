@@ -148,3 +148,9 @@ frontend/playwright-report/
 frontend/test-results/
 
 /frontend/.env.production
+
+# Local artifacts
+AGENTS.md
+frontend_architecture.txt
+cdss_architecture.png
+cdss_azure_deployment_steps.md
